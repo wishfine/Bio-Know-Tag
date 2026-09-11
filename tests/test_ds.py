@@ -7,6 +7,7 @@ import pytest
 
 from bio_know_tag.ds import (
     ALIGNMENT_DECISIONS,
+    NAME_SUFFICIENCY_DECISIONS,
     DSClient,
     build_stage1_prompt,
     classify_alignment,
@@ -110,6 +111,7 @@ def test_validate_alignment_rejects_out_of_range_score():
         "boundary_differences": [],
         "audit_decision": "原释义更准确",
         "audit_reason": "边界更完整",
+        "name_sufficiency": "需要原释义",
     }
 
     with pytest.raises(ValueError, match="between 1 and 5"):
@@ -124,6 +126,7 @@ def test_validate_alignment_rejects_unknown_decision():
         "boundary_differences": [],
         "audit_decision": "都可以",
         "audit_reason": "",
+        "name_sufficiency": "需要原释义",
     }
 
     with pytest.raises(ValueError, match="audit_decision"):
@@ -139,6 +142,7 @@ def test_validate_alignment_accepts_documented_decisions(decision: str):
         "boundary_differences": [],
         "audit_decision": decision,
         "audit_reason": "依据",
+        "name_sufficiency": "名称本身足够",
     }
 
     assert validate_alignment_result(result) == result
@@ -152,10 +156,42 @@ def test_classify_alignment_separates_clear_boundary_and_taxonomy_issue():
         "boundary_differences": [],
         "audit_decision": "两者基本等价",
         "audit_reason": "一致",
+        "name_sufficiency": "名称本身足够",
     }
 
     assert classify_alignment(base) == "L1"
-    assert classify_alignment({**base, "boundary_differences": ["实验边界"]}) == "L2"
+    assert classify_alignment({**base, "boundary_differences": ["非关键措辞差异"]}) == "L1"
+    assert classify_alignment({**base, "name_sufficiency": "需要原释义"}) == "L2"
     assert classify_alignment({**base, "alignment_score": 3}) == "L3"
     assert classify_alignment({**base, "audit_decision": "DS释义更准确"}) == "L3"
+    assert classify_alignment({**base, "name_sufficiency": "标签体系有问题"}) == "L3"
 
+
+def test_validate_alignment_rejects_unknown_name_sufficiency():
+    result = {
+        "alignment_score": 4,
+        "omissions": [],
+        "expansions": [],
+        "boundary_differences": [],
+        "audit_decision": "两者基本等价",
+        "audit_reason": "核心一致",
+        "name_sufficiency": "大概可以",
+    }
+
+    with pytest.raises(ValueError, match="name_sufficiency"):
+        validate_alignment_result(result)
+
+
+@pytest.mark.parametrize("decision", sorted(NAME_SUFFICIENCY_DECISIONS))
+def test_validate_alignment_accepts_name_sufficiency_decisions(decision: str):
+    result = {
+        "alignment_score": 4,
+        "omissions": [],
+        "expansions": [],
+        "boundary_differences": [],
+        "audit_decision": "两者基本等价",
+        "audit_reason": "核心一致",
+        "name_sufficiency": decision,
+    }
+
+    assert validate_alignment_result(result) == result

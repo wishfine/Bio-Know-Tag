@@ -20,6 +20,11 @@ ALIGNMENT_DECISIONS = {
     "两者都有问题",
     "无法仅凭现有信息判断",
 }
+NAME_SUFFICIENCY_DECISIONS = {
+    "名称本身足够",
+    "需要原释义",
+    "标签体系有问题",
+}
 TAXONOMY_ISSUE_DECISIONS = {
     "DS释义更准确",
     "两者都有问题",
@@ -157,6 +162,7 @@ def validate_alignment_result(value: dict[str, Any]) -> dict[str, Any]:
         "boundary_differences",
         "audit_decision",
         "audit_reason",
+        "name_sufficiency",
     )
     for field in required:
         if field not in value:
@@ -168,6 +174,10 @@ def validate_alignment_result(value: dict[str, Any]) -> dict[str, Any]:
         _validate_string_list(value[field], field)
     if value["audit_decision"] not in ALIGNMENT_DECISIONS:
         raise ValueError("audit_decision is not one of the documented decisions")
+    if value["name_sufficiency"] not in NAME_SUFFICIENCY_DECISIONS:
+        raise ValueError(
+            "name_sufficiency is not one of the documented decisions"
+        )
     _validate_string(value["audit_reason"], "audit_reason")
     return value
 
@@ -177,12 +187,10 @@ def classify_alignment(value: dict[str, Any]) -> str:
     if (
         validated["alignment_score"] <= 3
         or validated["audit_decision"] in TAXONOMY_ISSUE_DECISIONS
+        or validated["name_sufficiency"] == "标签体系有问题"
     ):
         return "L3"
-    if any(
-        validated[field]
-        for field in ("omissions", "expansions", "boundary_differences")
-    ):
+    if validated["name_sufficiency"] == "需要原释义":
         return "L2"
     return "L1"
 
@@ -223,6 +231,12 @@ DS 生成释义：{json.dumps(generated, ensure_ascii=False)}
 对齐分标准：
 5 基本完全一致；4 核心一致，仅边界有少量差异；3 主体一致但有重要缺失或扩张；2 理解方向明显偏差；1 基本不是同一知识点。
 
+逐项核验规则：
+1. 声称“遗漏”前，必须检查 DS 的 core_meaning、included_content、excluded_content 三处；已经明确或同义表达的内容不得算遗漏。
+2. 声称“扩张”前，必须检查老师原释义的 definition、core_concepts、common_assessments、distinctions 四处；合理举例、同义改写和解释细化不得算重要扩张。
+3. 轻微措辞差异、示例多少和解释详略不等于“需要原释义”。只有该差异可能改变一道题该不该打此 Label 时，才判“需要原释义”。
+4. name_sufficiency 必须回答实际判标问题：只给名称能否稳定决定题目是否属于该 Label。
+
 请只输出一个 JSON 对象：
 {{
   "alignment_score": 1到5的整数,
@@ -230,7 +244,8 @@ DS 生成释义：{json.dumps(generated, ensure_ascii=False)}
   "expansions": ["DS 多理解内容；没有则空数组"],
   "boundary_differences": ["关键边界差异；没有则空数组"],
   "audit_decision": "原释义更准确|DS释义更准确|两者基本等价|两者都有问题|无法仅凭现有信息判断",
-  "audit_reason": "简洁说明依据"
+  "audit_reason": "简洁说明依据",
+  "name_sufficiency": "名称本身足够|需要原释义|标签体系有问题"
 }}
 
 不要输出 Markdown 或 JSON 之外的文字。"""
@@ -312,4 +327,3 @@ def summarize_evidence(
         "pending": len(expected) - processed,
         "evidence_rows": evidence_rows,
     }
-
