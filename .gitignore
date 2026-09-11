@@ -1,5 +1,6 @@
 __pycache__/
 *.py[cod]
+*.egg-info/
 .pytest_cache/
 .venv/
 runtime/*
@@ -7,4 +8,3 @@ runtime/*
 source/raw/*
 !source/raw/README.md
 .DS_Store
-
