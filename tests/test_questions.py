@@ -9,9 +9,20 @@ from bio_know_tag.questions import (
 )
 
 
-def qinfo(stem: str, *, analysis: str = "解析", options=None) -> str:
+def qinfo(
+    stem: str,
+    *,
+    analysis: str = "解析",
+    answer: str = "答案",
+    options=None,
+) -> str:
     return json.dumps(
-        {"stem": stem, "analysis": analysis, "options": options or []},
+        {
+            "stem": stem,
+            "analysis": analysis,
+            "answer": answer,
+            "options": options or [],
+        },
         ensure_ascii=False,
     )
 
@@ -25,6 +36,10 @@ def parent_row() -> dict:
         "answered_count": 10,
         "percent_correct": 0.5,
         "difficulty": "中等",
+        "question_index": 7,
+        "subject": "高中生物",
+        "business_type": "题库",
+        "knw_ids": ["old-1", "old-2"],
     }
 
 
@@ -57,6 +72,7 @@ def test_clean_question_info_removes_images_and_formats_options():
     assert cleaned["stem"] == "小题 10^{3}"
     assert cleaned["options"] == "A. 正确\nB. 干扰"
     assert cleaned["analysis"] == "解析"
+    assert cleaned["answer"] == "答案"
 
 
 def test_aggregate_supports_child_before_parent():
@@ -64,6 +80,11 @@ def test_aggregate_supports_child_before_parent():
 
     assert parents[0]["question_id"] == "p1"
     assert parents[0]["stem"] == "大题 CO_{2}"
+    assert parents[0]["answer"] == "答案"
+    assert parents[0]["question_index"] == 7
+    assert parents[0]["subject"] == "高中生物"
+    assert parents[0]["business_type"] == "题库"
+    assert parents[0]["knw_ids"] == ["old-1", "old-2"]
     assert [question["question_id"] for question in parents[0]["sub_questions"]] == [
         "c1"
     ]
@@ -121,3 +142,67 @@ def test_process_jsonl_reports_malformed_json_and_writes_atomically(tmp_path: Pa
     assert json.loads(report_path.read_text(encoding="utf-8")) == report
     assert not list(output_path.parent.glob("*.tmp"))
 
+
+def test_process_jsonl_uses_streaming_path_instead_of_in_memory_aggregate(
+    tmp_path: Path, monkeypatch
+):
+    input_path = tmp_path / "input.jsonl"
+    output_path = tmp_path / "questions.jsonl"
+    report_path = tmp_path / "report.json"
+    rows = [
+        {
+            "question_id": f"q{index}",
+            "parent_id": f"q{index}",
+            "question_info": {"stem": f"题目{index}", "options": [], "analysis": "", "answer": "A"},
+        }
+        for index in range(5)
+    ]
+    input_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    import bio_know_tag.questions as questions
+
+    def fail_if_called(_rows):
+        raise AssertionError("process_jsonl must not collect all rows via aggregate_questions")
+
+    monkeypatch.setattr(questions, "aggregate_questions", fail_if_called)
+
+    report = process_jsonl(input_path, output_path, report_path)
+
+    assert report["processed"] == 5
+    assert output_path.read_text(encoding="utf-8").count("\n") == 5
+
+
+def test_process_jsonl_streaming_path_aggregates_child_before_parent(tmp_path: Path):
+    input_path = tmp_path / "input.jsonl"
+    output_path = tmp_path / "questions.jsonl"
+    report_path = tmp_path / "report.json"
+    standalone = {
+        "question_id": "solo",
+        "parent_id": "solo",
+        "question_info": {
+            "stem": "独立题",
+            "options": [],
+            "analysis": "解析",
+            "answer": "A",
+        },
+    }
+    input_path.write_text(
+        "".join(
+            json.dumps(row, ensure_ascii=False) + "\n"
+            for row in (child_row(), standalone, parent_row())
+        ),
+        encoding="utf-8",
+    )
+
+    report = process_jsonl(input_path, output_path, report_path)
+    output = [json.loads(line) for line in output_path.read_text(encoding="utf-8").splitlines()]
+    by_id = {row["question_id"]: row for row in output}
+
+    assert report["parent_count"] == 2
+    assert report["child_count"] == 1
+    assert by_id["p1"]["stem"] == "大题 CO_{2}"
+    assert by_id["p1"]["sub_questions"][0]["question_id"] == "c1"
+    assert by_id["p1"]["knw_ids"] == ["old-1", "old-2"]
