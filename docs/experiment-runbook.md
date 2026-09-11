@@ -40,7 +40,7 @@ git pull --ff-only origin main
 git log -1 --oneline
 ```
 
-## 3. 准备数据与 Python 环境
+## 3. 准备数据与 Miniconda base 环境
 
 使用 `cp -n` 避免覆盖已有原始数据：
 
@@ -53,9 +53,11 @@ wc -l '/local_data/zhangyonglin/data/bio-know-tag/biology.raw.jsonl'
 sha256sum '/local_data/zhangyonglin/data/bio-know-tag/biology.raw.jsonl'
 
 cd /local_data/zhangyonglin/Bio-Know-Tag
-python3 -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
-.venv/bin/python -m pytest -q
+source "$(conda info --base)/etc/profile.d/conda.sh"
+conda activate base
+python --version  # 需要 Python 3.10+
+python -m pip install -e '.[dev]'
+python -m pytest -q
 ```
 
 ## 4. 题目清洗 smoke
@@ -66,11 +68,11 @@ python3 -m venv .venv
 cd /local_data/zhangyonglin/Bio-Know-Tag
 RUN="runtime/$(date +%Y%m%d-%H%M%S)-smoke"
 mkdir -p "$RUN"
-.venv/bin/python scripts/preprocess_questions.py \
+python scripts/preprocess_questions.py \
   --input '/local_data/zhangyonglin/data/bio-know-tag/biology.raw.jsonl' \
   --limit 100 \
   --run-dir "$RUN/preprocess"
-python3 -m json.tool "$RUN/preprocess/report.json"
+python -m json.tool "$RUN/preprocess/report.json"
 wc -l "$RUN/preprocess/questions.jsonl"
 ```
 
@@ -97,12 +99,12 @@ curl -sS --max-time 30 \
 ```bash
 SMOKE1="$RUN/stage1"
 mkdir -p "$SMOKE1"
-.venv/bin/python scripts/run_label_self_explain.py \
+python scripts/run_label_self_explain.py \
   --run-dir "$SMOKE1" \
   --limit 3 \
   --endpoint "$DS1" \
   --endpoint "$DS2"
-python3 -m json.tool "$SMOKE1/stage1.report.json"
+python -m json.tool "$SMOKE1/stage1.report.json"
 wc -l "$SMOKE1/stage1.evidence.jsonl"
 ```
 
@@ -113,13 +115,13 @@ wc -l "$SMOKE1/stage1.evidence.jsonl"
 ```bash
 SMOKE2="$RUN/stage2"
 mkdir -p "$SMOKE2"
-.venv/bin/python scripts/judge_label_alignment.py \
+python scripts/judge_label_alignment.py \
   --stage1-evidence "$SMOKE1/stage1.evidence.jsonl" \
   --run-dir "$SMOKE2" \
   --limit 3 \
   --endpoint "$DS1" \
   --endpoint "$DS2"
-python3 -m json.tool "$SMOKE2/stage2.report.json"
+python -m json.tool "$SMOKE2/stage2.report.json"
 wc -l "$SMOKE2/stage2.evidence.jsonl" "$SMOKE2/manual_review.jsonl"
 ```
 
@@ -131,7 +133,7 @@ wc -l "$SMOKE2/stage2.evidence.jsonl" "$SMOKE2/manual_review.jsonl"
 cd /local_data/zhangyonglin/Bio-Know-Tag
 RUN="runtime/$(date +%Y%m%d-%H%M%S)-full"
 mkdir -p "$RUN/stage1"
-nohup .venv/bin/python scripts/run_label_self_explain.py \
+nohup python scripts/run_label_self_explain.py \
   --run-dir "$RUN/stage1" \
   --endpoint "$DS1" \
   --endpoint "$DS2" \
@@ -145,7 +147,7 @@ printf 'RUN=%s PID=%s\n' "$RUN" "$PID"
 
 ```bash
 tail -n 50 "$RUN/stage1/nohup.log"
-python3 -m json.tool "$RUN/stage1/stage1.report.json"
+python -m json.tool "$RUN/stage1/stage1.report.json"
 wc -l "$RUN/stage1/stage1.evidence.jsonl"
 ps -p "$(cat "$RUN/stage1/pid")" -o pid,etime,stat,command
 ```
@@ -158,7 +160,7 @@ ps -p "$(cat "$RUN/stage1/pid")" -o pid,etime,stat,command
 
 ```bash
 mkdir -p "$RUN/stage2"
-nohup .venv/bin/python scripts/judge_label_alignment.py \
+nohup python scripts/judge_label_alignment.py \
   --stage1-evidence "$RUN/stage1/stage1.evidence.jsonl" \
   --run-dir "$RUN/stage2" \
   --endpoint "$DS1" \
@@ -177,7 +179,7 @@ printf 'RUN=%s PID=%s\n' "$RUN" "$PID"
 
 ```bash
 mkdir -p "$RUN/preprocess"
-nohup .venv/bin/python scripts/preprocess_questions.py \
+nohup python scripts/preprocess_questions.py \
   --input '/local_data/zhangyonglin/data/bio-know-tag/biology.raw.jsonl' \
   --run-dir "$RUN/preprocess" \
   > "$RUN/preprocess/nohup.log" 2>&1 &
@@ -193,4 +195,3 @@ cp -n "$RUN/preprocess/questions.jsonl" \
 wc -l '/local_data/zhangyonglin/data/bio-know-tag/biology.cleaned.grouped.jsonl'
 sha256sum '/local_data/zhangyonglin/data/bio-know-tag/biology.cleaned.grouped.jsonl'
 ```
-
