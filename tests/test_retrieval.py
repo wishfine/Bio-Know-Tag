@@ -92,6 +92,23 @@ def test_validate_coarse_result_requires_exact_questions_and_known_labels():
         )
 
 
+def test_validate_coarse_result_stably_deduplicates_candidates():
+    value = {
+        "results": [
+            {
+                "question_id": "q1",
+                "candidate_label_ids": ["L1", "L2", "L1", "L2"],
+            }
+        ]
+    }
+
+    validated = validate_coarse_recall_result(
+        value, ["q1"], {"L1", "L2"}, top_k=20
+    )
+
+    assert validated["results"][0]["candidate_label_ids"] == ["L1", "L2"]
+
+
 def test_rrf_fuses_rankings_without_requiring_all_methods():
     fused = reciprocal_rank_fusion(
         [["L1", "L2"], ["L2", "L1"], ["L2"]],

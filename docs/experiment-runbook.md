@@ -440,4 +440,6 @@ head -n 1 "$COARSE_SMOKE/candidates.jsonl" | python -m json.tool
 
 验收要求：`input=processed=success=10`、`error=pending=0`、候选ID均属于458图谱、路径均使用`@`。相同 `--run-dir` 重跑时，已有成功题目会跳过，失败批次会继续重试。
 
+DS偶尔会在同一道题中重复输出相同候选ID。粗召回程序会保持首次出现顺序自动去重，并在evidence的 `parsed_response.normalization.duplicate_candidate_ids_removed` 中记录修复数量，不再因此丢弃整批题目。未知ID、漏题或乱序仍按错误处理。
+
 DS粗召回全2,500条需等10题smoke人工查看后再启动。该结果不是金标，只是与BM25、Dense和混合召回比较的候选基线。

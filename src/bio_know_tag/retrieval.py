@@ -208,6 +208,7 @@ def validate_coarse_recall_result(
         raise ValueError("results must be a list")
     expected = [str(question_id) for question_id in expected_question_ids]
     actual = []
+    duplicates_removed = 0
     for result in results:
         if not isinstance(result, dict):
             raise ValueError("each result must be an object")
@@ -219,15 +220,21 @@ def validate_coarse_recall_result(
             for label_id in candidates
         ):
             raise ValueError("candidate_label_ids must be a list of strings")
+        unique_candidates = list(dict.fromkeys(candidates))
+        duplicates_removed += len(candidates) - len(unique_candidates)
+        result["candidate_label_ids"] = unique_candidates
+        candidates = unique_candidates
         if len(candidates) > top_k:
             raise ValueError("candidate_label_ids exceeds top_k")
-        if len(candidates) != len(set(candidates)):
-            raise ValueError("candidate_label_ids contains duplicates")
         unknown = [label_id for label_id in candidates if label_id not in known_label_ids]
         if unknown:
             raise ValueError(f"unknown label_id: {unknown[0]}")
     if actual != expected:
         raise ValueError("results must contain every requested question exactly once and in order")
+    if duplicates_removed:
+        value["normalization"] = {
+            "duplicate_candidate_ids_removed": duplicates_removed
+        }
     return value
 
 
@@ -435,6 +442,14 @@ def run_ds_coarse_recall(
                 ],
                 max_tokens=max_tokens,
             )
+            record.update(
+                {
+                    "raw_response": response.content,
+                    "endpoint": response.endpoint,
+                    "attempts": response.attempts,
+                    "latency_seconds": response.latency_seconds,
+                }
+            )
             parsed = validate_coarse_recall_result(
                 parse_json_content(response.content),
                 question_ids,
@@ -443,11 +458,7 @@ def run_ds_coarse_recall(
             )
             record.update(
                 {
-                    "raw_response": response.content,
                     "parsed_response": parsed,
-                    "endpoint": response.endpoint,
-                    "attempts": response.attempts,
-                    "latency_seconds": response.latency_seconds,
                 }
             )
             requests_succeeded += 1
