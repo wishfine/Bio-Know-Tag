@@ -25,6 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--max-tokens", type=int, default=1024)
+    parser.add_argument("--workers", type=int, default=1)
     return parser.parse_args()
 
 
@@ -35,6 +36,8 @@ def main() -> int:
         raise SystemExit("provide --endpoint or set DS1/DS2")
     if args.limit is not None and args.limit < 1:
         raise SystemExit("--limit must be positive")
+    if args.workers < 1:
+        raise SystemExit("--workers must be positive")
     run_dir = args.run_dir or Path("runtime") / datetime.now().strftime(
         "%Y%m%d-%H%M%S-candidate-adjudication"
     )
@@ -53,6 +56,7 @@ def main() -> int:
         model=args.model,
         limit=args.limit,
         max_tokens=args.max_tokens,
+        workers=args.workers,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1

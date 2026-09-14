@@ -1,4 +1,6 @@
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -184,3 +186,84 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     tail = json.loads((output / "tail_selected.jsonl").read_text(encoding="utf-8"))
     assert tail["question"]["question_id"] == "q1"
     assert tail["prediction"]["selected_labels"][0]["candidate_rank"] == 23
+
+
+def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units = [{**_unit(), "question_id": question_id} for question_id in ("q1", "q2")]
+    units_path.write_text(
+        "".join(json.dumps(unit, ensure_ascii=False) + "\n" for unit in units),
+        encoding="utf-8",
+    )
+    candidates_path.write_text(
+        "".join(
+            json.dumps(
+                {"question_id": unit["question_id"], "candidates": [_candidate(1)]},
+                ensure_ascii=False,
+            )
+            + "\n"
+            for unit in units
+        ),
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = json.dumps(
+            {
+                "selected": [
+                    {
+                        "code": "C01",
+                        "question_evidence": "题干",
+                        "necessity": "覆盖当前设问",
+                    }
+                ],
+                "rejected_close_codes": [],
+                "none_of_candidates": False,
+                "need_expand_recall": False,
+                "reason": "最小充分集合。",
+            },
+            ensure_ascii=False,
+        )
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def __init__(self):
+            self.lock = threading.Lock()
+            self.active = 0
+            self.max_active = 0
+
+        def chat(self, messages, *, max_tokens):
+            with self.lock:
+                self.active += 1
+                self.max_active = max(self.max_active, self.active)
+            time.sleep(0.03)
+            with self.lock:
+                self.active -= 1
+            return Response()
+
+    client = Client()
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        client,
+        model="fake-model",
+        workers=2,
+    )
+
+    assert report["success"] == 2
+    assert report["workers"] == 2
+    assert report["run_wall_seconds"] > 0
+    assert report["requests_per_second_this_run"] > 0
+    assert report["request_latency_seconds"]["count"] == 2
+    assert client.max_active == 2

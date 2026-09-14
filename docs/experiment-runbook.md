@@ -608,6 +608,7 @@ PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --run-dir "$JUDGE_SMOKE" \
   --endpoint "$DS1" \
   --limit 10 \
+  --workers 1 \
   --max-tokens 1024
 
 python -m json.tool "$JUDGE_SMOKE/report.json"
@@ -630,3 +631,5 @@ wc -l \
 - 同时检查 `need_expand_recall` 和“人工真值不在25项内”的比例；它们反映召回上限，而不是DS精判能力。
 
 最终应报告人工金标上的 `Recall@20`、`Recall@25`、两者增量、DS多打率、漏打率和每题平均标签数，再冻结生产参数。
+
+精判器支持 `--workers` 并发请求；所有HTTP请求可并行，但 evidence 仍由主线程逐行安全落盘。`report.json` 会记录并发数、运行墙钟时间、请求吞吐及延迟的均值、P50、P95和最大值。先用20题、`--workers 4` 验证服务承载能力，再逐步增加到8；若出现超时或HTTP错误，应降低并发并在同一运行目录续跑失败项。

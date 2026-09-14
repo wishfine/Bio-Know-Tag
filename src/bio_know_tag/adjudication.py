@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import time
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -193,7 +196,12 @@ def run_adjudication(
     model: str,
     limit: int | None = None,
     max_tokens: int = 1024,
+    workers: int = 1,
 ) -> dict[str, Any]:
+    run_started = time.monotonic()
+    run_started_at = datetime.now(timezone.utc).isoformat()
+    if workers < 1:
+        raise ValueError("workers must be positive")
     units = _read_jsonl(units_path)
     if limit is not None:
         units = units[:limit]
@@ -214,9 +222,12 @@ def run_adjudication(
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "evidence.jsonl"
     prompt_version = "candidate-adjudication-v2"
-    completed, _ = _latest_success(evidence_path, prompt_version=prompt_version)
+    completed, evidence_rows = _latest_success(
+        evidence_path, prompt_version=prompt_version
+    )
     requests_succeeded = 0
     requests_failed = 0
+    pending_units: list[tuple[int, dict[str, Any]]] = []
     for index, unit in enumerate(units, 1):
         question_id = str(unit["question_id"])
         if question_id in completed:
@@ -229,6 +240,12 @@ def run_adjudication(
         ]
         if unknown:
             raise ValueError(f"candidate uses unknown label_id: {unknown[0]}")
+        pending_units.append((index, unit))
+
+    def adjudicate(item: tuple[int, dict[str, Any]]) -> tuple[int, dict[str, Any]]:
+        index, unit = item
+        question_id = str(unit["question_id"])
+        candidates = candidate_rows[question_id].get("candidates") or []
         prompt, code_map = build_adjudication_prompt(unit, candidates, labels_by_id)
         record = {
             "stage": "candidate_adjudication",
@@ -278,30 +295,46 @@ def run_adjudication(
                     )
                 ),
             )
-            requests_succeeded += 1
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"
-            requests_failed += 1
-        append_evidence(evidence_path, record)
-        completed, evidence_rows = _latest_success(
-            evidence_path, prompt_version=prompt_version
-        )
-        interim = {
-            "input": len(units),
-            "success": len(completed),
-            "error": len(units) - len(completed),
-            "pending": len(units) - len(completed),
-            "evidence_rows": evidence_rows,
-            "requests_succeeded_this_run": requests_succeeded,
-            "requests_failed_this_run": requests_failed,
-            "model": model,
-            "prompt_version": prompt_version,
-        }
-        _write_json_atomic(output_dir / "report.json", interim)
-        print(
-            f"[{index}/{len(units)}] {question_id} {'ERROR' if record['error'] else 'OK'}",
-            flush=True,
-        )
+        return index, record
+
+    def persist(results: Any) -> None:
+        nonlocal completed, evidence_rows, requests_succeeded, requests_failed
+        finished_this_run = 0
+        for original_index, record in results:
+            finished_this_run += 1
+            question_id = str(record["question_id"])
+            requests_failed += int(bool(record["error"]))
+            requests_succeeded += int(not record["error"])
+            append_evidence(evidence_path, record)
+            evidence_rows += 1
+            if not record["error"]:
+                completed[question_id] = record
+            interim = {
+                "input": len(units),
+                "success": len(completed),
+                "error": len(units) - len(completed),
+                "pending": len(units) - len(completed),
+                "evidence_rows": evidence_rows,
+                "requests_succeeded_this_run": requests_succeeded,
+                "requests_failed_this_run": requests_failed,
+                "workers": workers,
+                "model": model,
+                "prompt_version": prompt_version,
+            }
+            _write_json_atomic(output_dir / "report.json", interim)
+            print(
+                f"[{finished_this_run}/{len(pending_units)}; source={original_index}/{len(units)}] "
+                f"{question_id} {'ERROR' if record['error'] else 'OK'}",
+                flush=True,
+            )
+
+    if workers == 1:
+        persist(map(adjudicate, pending_units))
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            persist(executor.map(adjudicate, pending_units))
 
     completed, evidence_rows = _latest_success(
         evidence_path, prompt_version=prompt_version
@@ -402,6 +435,20 @@ def run_adjudication(
     temporary.replace(predictions_path)
     tail_temporary.replace(tail_path)
     success = len(completed)
+    latencies = sorted(
+        float(record["latency_seconds"])
+        for record in completed.values()
+        if isinstance(record.get("latency_seconds"), (int, float))
+    )
+
+    def percentile(values: list[float], fraction: float) -> float | None:
+        if not values:
+            return None
+        index = max(0, math.ceil(len(values) * fraction) - 1)
+        return round(values[index], 3)
+
+    run_wall_seconds = round(time.monotonic() - run_started, 3)
+    requests_this_run = requests_succeeded + requests_failed
     report = {
         "input": len(units),
         "processed": success,
@@ -411,6 +458,21 @@ def run_adjudication(
         "evidence_rows": evidence_rows,
         "requests_succeeded": requests_succeeded,
         "requests_failed": requests_failed,
+        "workers": workers,
+        "run_started_at": run_started_at,
+        "run_wall_seconds": run_wall_seconds,
+        "requests_per_second_this_run": round(
+            requests_this_run / run_wall_seconds, 4
+        )
+        if run_wall_seconds
+        else None,
+        "request_latency_seconds": {
+            "count": len(latencies),
+            "mean": round(sum(latencies) / len(latencies), 3) if latencies else None,
+            "p50": percentile(latencies, 0.5),
+            "p95": percentile(latencies, 0.95),
+            "max": round(latencies[-1], 3) if latencies else None,
+        },
         "selected_count_distribution": dict(
             sorted(selected_count_distribution.items(), key=lambda item: int(item[0]))
         ),
