@@ -167,6 +167,121 @@ def _summary(records: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def _rules_section() -> list[str]:
+    return [
+        "## L1 / L2 / L3 是什么",
+        "",
+        "这三个等级描述的是‘Label 名称本身’与老师原释义的对齐情况，不是题目打标准确率：",
+        "",
+        "- **L1**：名称本身基本足够理解；通常为对齐分数 4–5，且 Judge 没有判定为实质冲突。",
+        "- **L2**：主题方向基本正确，但仅看名称不足以稳定决定题目归属，需要带上原释义或精简边界。",
+        "- **L3**：存在重要遗漏/扩张、明显方向偏差或 taxonomy 问题，需要严格释义或暂停自动化。",
+        "",
+        "代码中的实际归类规则是：分数 ≤3、Judge 结论为‘DS释义更准确/两者都有问题/无法仅凭现有信息判断’，或名称充分性为‘标签体系有问题’时归为 L3；否则名称充分性为‘需要原释义’时归为 L2；其余归为 L1。",
+        "",
+        "## DS 释义 Prompt",
+        "",
+        "Stage1 只把 Label 名称发给 DS，不发送老师原释义。系统消息和用户 Prompt 如下（`{label_name}` 为实际 Label 名）：",
+        "",
+        "```text",
+        "system: 你是严谨的高中生物知识点判别器。",
+        "",
+        "user:",
+        "你是一名高中生物教师。",
+        "",
+        "现在给你一个高中生物知识点标签：",
+        "【{label_name}】",
+        "",
+        "在不知道任何已有知识点释义的情况下，仅根据标签名称和你的高中生物知识，写出你认为这个标签对应的知识范围。",
+        "",
+        "请只输出一个 JSON 对象，字段严格如下：",
+        '{"core_meaning":"核心含义","included_content":["应该包含的考查内容"],"excluded_content":["不应该包含的相近内容"]}',
+        "",
+        "不要猜测标签体系设计者的特殊规则。不要输出 Markdown 或 JSON 之外的文字。",
+        "```",
+        "",
+        "请求参数固定为 `temperature=0`、`max_tokens=1024`，模型默认是 `DeepSeek-V4-Flash`。",
+        "",
+        "## DS Judge Prompt 与分数",
+        "",
+        "Stage2 把老师四列原释义与 Stage1 的 DS 释义一起发给 DS Judge。它要求先逐项检查遗漏、扩张和边界，再输出结构化结果：",
+        "",
+        "```text",
+        "你是一名严谨的高中生物知识点体系审核专家。",
+        "",
+        "请比较同一 Label 的老师原释义与‘仅看 Label 名’生成的 DS 释义。不要默认任一方必然正确。",
+        "",
+        "Label 名称：{label_name}",
+        "老师原释义：{definition, core_concepts, common_assessments, distinctions}",
+        "DS 生成释义：{core_meaning, included_content, excluded_content}",
+        "",
+        "对齐分标准：",
+        "5 基本完全一致；4 核心一致，仅边界有少量差异；3 主体一致但有重要缺失或扩张；2 理解方向明显偏差；1 基本不是同一知识点。",
+        "",
+        "请输出 JSON：alignment_score、omissions、expansions、boundary_differences、audit_decision、audit_reason、name_sufficiency。",
+        "其中 name_sufficiency 必须回答：只给名称能否稳定决定题目是否属于该 Label。",
+        "```",
+        "",
+        "因此，DS Judge 分数衡量的是‘DS 释义是否贴合老师 taxonomy’，不是 DS 对题目打标的 Accuracy。分数低不一定等于老师一定正确，Prompt 明确要求不要默认任一方必然正确。",
+        "",
+        "## GPT Judge 状态",
+        "",
+        "文档中的 GPT Judge 指 `second_review` 二次复核字段。它不是另一份原始 DS 证据，而是基于老师释义、Stage1、Stage2、参考策略和 taxonomy 风险对上一版路由做的独立复核：",
+        "",
+        "- **confirmed**：逐条核对后确认原策略，无需额外人工跟进。",
+        "- **confirmed_with_caution**：总体路由可用，但存在边界风险；当前统一收紧为 `strict_definition`，需要人工跟进。",
+        "- **adjusted**：二次复核发现原策略可能造成实质误标，已调整最终策略；本批共 21 个。",
+        "- **routed_separately**：这是题型/数据形式/能力等正交维度，不写入知识 Label，单独预测；本批共 12 个。",
+        "- **taxonomy_hold**：Label 与释义或兄弟节点无法稳定区分，暂停自动最终打标，先修 taxonomy；本批共 3 个。",
+        "",
+        "## 最终处理策略",
+        "",
+        "- **name_only**：只用 Label 名做候选召回，再由 LLM 根据设问判断；本批最终数量为 0。",
+        "- **name_plus_boundary**：Label 名 + 老师的一条易混淆边界；兼顾吞吐与边界稳定性，本批 188 个。",
+        "- **compact_definition**：Label 名 + 老师定义/核心概念/易混淆区分等精简释义，本批 224 个。",
+        "- **strict_definition**：提供完整老师释义，并明确命中条件与排除条件；用于 L3 或 P1/P2/高风险边界，本批 31 个。",
+        "- **separate_dimension**：信息载体、题型、能力、来源等结构性维度与知识标签分开存储，本批 12 个。",
+        "- **taxonomy_hold**：不让模型猜，先修订 taxonomy 或使用来源字段硬路由，本批 3 个。",
+        "",
+    ]
+
+
+def _manual_followup_section(records: list[dict[str, Any]]) -> list[str]:
+    selected = [
+        record
+        for record in records
+        if (record.get("second_review") or {}).get("manual_followup_required")
+    ]
+    lines = [
+        "## 需要人工跟进的 Label",
+        "",
+        f"共 **{len(selected)}** 个。人工跟进不代表整条记录失败，而是要求在正式全量自动打标前，对这些 Label 的边界、来源或 taxonomy 做一次确认。",
+        "",
+        "| 序号 | Label名称 | label_id | DS Judge | 分数 | GPT状态 | 最终策略 | 人工跟进原因 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for index, record in enumerate(selected, 1):
+        stage2 = record.get("stage2_judge") or {}
+        review = record.get("second_review") or {}
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    str(index),
+                    _md_cell(record.get("label_name")),
+                    _md_cell(record.get("label_id")),
+                    _md_cell(record.get("stage2_category")),
+                    _md_cell(stage2.get("alignment_score")),
+                    _md_cell(review.get("status")),
+                    _md_cell(review.get("final_mode")),
+                    _md_cell(review.get("rationale")),
+                ]
+            )
+            + " |"
+        )
+    return lines
+
+
 def build_markdown(records: Iterable[dict[str, Any]]) -> str:
     source_records = list(records)
     rows = build_rows(source_records)
@@ -181,6 +296,7 @@ def build_markdown(records: Iterable[dict[str, Any]]) -> str:
         "",
         *_summary(source_records),
         "",
+        *_rules_section(),
         "## 逐 Label 复核表",
         "",
         "| " + " | ".join(MARKDOWN_HEADERS) + " |",
@@ -190,6 +306,8 @@ def build_markdown(records: Iterable[dict[str, Any]]) -> str:
         lines.append("| " + " | ".join(_md_cell(row[header]) for header in MARKDOWN_HEADERS) + " |")
     lines.extend(
         [
+            "",
+            *_manual_followup_section(source_records),
             "",
             "## 字段说明",
             "",

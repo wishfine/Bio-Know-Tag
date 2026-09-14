@@ -54,6 +54,12 @@ def test_build_markdown_has_one_row_and_escapes_table_breaks():
     assert "GPT Judge结果（二次复核）" in markdown
     assert "name_plus_boundary" in markdown
     assert "<br>" in markdown
+    assert "## L1 / L2 / L3 是什么" in markdown
+    assert "## DS 释义 Prompt" in markdown
+    assert "## DS Judge Prompt 与分数" in markdown
+    assert "## GPT Judge 状态" in markdown
+    assert "## 最终处理策略" in markdown
+    assert "## 需要人工跟进的 Label" in markdown
 
 
 def test_write_markdown_returns_row_count(tmp_path):
