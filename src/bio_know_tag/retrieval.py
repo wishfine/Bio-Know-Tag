@@ -51,7 +51,7 @@ def _weighted_tokens(*fields: tuple[Any, int]) -> list[str]:
 def build_label_cards(labels: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     cards = []
     seen_ids: set[str] = set()
-    for label in labels:
+    for index, label in enumerate(labels, 1):
         label_id = str(label.get("label_id") or "").strip()
         if not label_id:
             raise ValueError("label_id is required")
@@ -59,6 +59,7 @@ def build_label_cards(labels: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
             raise ValueError(f"duplicate label_id: {label_id}")
         seen_ids.add(label_id)
         card = {
+            "code": f"B{index:03d}",
             "label_id": label_id,
             "label_name": str(label.get("label_name") or "").strip(),
             "label_path": format_label_path(label.get("label_path")),
@@ -171,7 +172,7 @@ def build_coarse_recall_prompt(
 ) -> str:
     compact_catalog = [
         {
-            "label_id": card["label_id"],
+            "code": card["code"],
             "label_path": card["label_path"],
         }
         for card in cards
@@ -184,7 +185,7 @@ def build_coarse_recall_prompt(
 2. 候选应覆盖完成设问可能需要的知识点，包括容易混淆的相邻Label。
 3. 不因背景词、实验工具或错误选项机械加入Label。
 4. 每题最多返回{top_k}个label_id，按可能性从高到低排列；确实没有合适项时允许空数组。
-5. 只能使用目录中存在的label_id。不要使用旧knw_ids。
+5. 只能使用目录中存在的短代码（B001至B458），不要抄写19位label_id，不要使用旧knw_ids。
 
 Label目录（仅名称路径，不含释义）：
 {json.dumps(compact_catalog, ensure_ascii=False)}
@@ -193,13 +194,13 @@ Label目录（仅名称路径，不含释义）：
 {json.dumps(compact_units, ensure_ascii=False)}
 
 只输出一个JSON对象，不要输出Markdown或解释：
-{{"results":[{{"question_id":"原question_id","candidate_label_ids":["按可能性排序的label_id"]}}]}}"""
+{{"results":[{{"question_id":"原question_id","candidate_codes":["按可能性排序的短代码"]}}]}}"""
 
 
 def validate_coarse_recall_result(
     value: dict[str, Any],
     expected_question_ids: Iterable[str],
-    known_label_ids: set[str],
+    known_candidate_codes: set[str],
     *,
     top_k: int,
 ) -> dict[str, Any]:
@@ -209,32 +210,35 @@ def validate_coarse_recall_result(
     expected = [str(question_id) for question_id in expected_question_ids]
     actual = []
     duplicates_removed = 0
+    codes_truncated = 0
     for result in results:
         if not isinstance(result, dict):
             raise ValueError("each result must be an object")
         question_id = str(result.get("question_id") or "")
         actual.append(question_id)
-        candidates = result.get("candidate_label_ids")
+        candidates = result.get("candidate_codes")
         if not isinstance(candidates, list) or any(
             not isinstance(label_id, str) or not label_id
             for label_id in candidates
         ):
-            raise ValueError("candidate_label_ids must be a list of strings")
+            raise ValueError("candidate_codes must be a list of strings")
         unique_candidates = list(dict.fromkeys(candidates))
         duplicates_removed += len(candidates) - len(unique_candidates)
-        result["candidate_label_ids"] = unique_candidates
-        candidates = unique_candidates
-        if len(candidates) > top_k:
-            raise ValueError("candidate_label_ids exceeds top_k")
-        unknown = [label_id for label_id in candidates if label_id not in known_label_ids]
+        unknown = [
+            code for code in unique_candidates if code not in known_candidate_codes
+        ]
         if unknown:
-            raise ValueError(f"unknown label_id: {unknown[0]}")
+            raise ValueError(f"unknown candidate code: {unknown[0]}")
+        result["candidate_codes"] = unique_candidates[:top_k]
+        codes_truncated += max(0, len(unique_candidates) - top_k)
     if actual != expected:
         raise ValueError("results must contain every requested question exactly once and in order")
-    if duplicates_removed:
-        value["normalization"] = {
-            "duplicate_candidate_ids_removed": duplicates_removed
-        }
+    if duplicates_removed or codes_truncated:
+        value["normalization"] = {}
+        if duplicates_removed:
+            value["normalization"]["duplicate_candidate_codes_removed"] = duplicates_removed
+        if codes_truncated:
+            value["normalization"]["candidate_codes_truncated"] = codes_truncated
     return value
 
 
@@ -357,7 +361,9 @@ def run_sparse_retrieval(
     return report
 
 
-def _latest_coarse_results(evidence_path: Path) -> tuple[dict[str, list[str]], int]:
+def _latest_coarse_results(
+    evidence_path: Path, code_to_id: dict[str, str]
+) -> tuple[dict[str, list[str]], int]:
     latest: dict[str, list[str]] = {}
     evidence_rows = 0
     if not evidence_path.exists():
@@ -369,9 +375,8 @@ def _latest_coarse_results(evidence_path: Path) -> tuple[dict[str, list[str]], i
             continue
         for result in parsed.get("results") or []:
             if isinstance(result, dict) and result.get("question_id"):
-                latest[str(result["question_id"])] = [
-                    str(value) for value in result.get("candidate_label_ids") or []
-                ]
+                codes = [str(value) for value in result.get("candidate_codes") or []]
+                latest[str(result["question_id"])] = [code_to_id[code] for code in codes]
     return latest, evidence_rows
 
 
@@ -393,7 +398,9 @@ def run_ds_coarse_recall(
     labels = list(_read_objects(labels_path))
     cards = build_label_cards(labels)
     cards_by_id = {card["label_id"]: card for card in cards}
-    known_ids = set(cards_by_id)
+    cards_by_code = {card["code"]: card for card in cards}
+    code_to_id = {code: card["label_id"] for code, card in cards_by_code.items()}
+    known_codes = set(cards_by_code)
     units = []
     for index, unit in enumerate(_read_objects(units_path), 1):
         if limit is not None and index > limit:
@@ -408,7 +415,7 @@ def run_ds_coarse_recall(
     output_dir = Path(run_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "evidence.jsonl"
-    completed, _ = _latest_coarse_results(evidence_path)
+    completed, _ = _latest_coarse_results(evidence_path, code_to_id)
     pending = [unit for unit in units if str(unit["question_id"]) not in completed]
     requests_succeeded = 0
     requests_failed = 0
@@ -419,7 +426,7 @@ def run_ds_coarse_recall(
         prompt = build_coarse_recall_prompt(batch, cards, top_k=top_k)
         record = {
             "stage": "ds_coarse_recall",
-            "prompt_version": "coarse-all-paths-v1",
+            "prompt_version": "coarse-all-paths-v2",
             "question_ids": question_ids,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "model": model,
@@ -453,7 +460,7 @@ def run_ds_coarse_recall(
             parsed = validate_coarse_recall_result(
                 parse_json_content(response.content),
                 question_ids,
-                known_ids,
+                known_codes,
                 top_k=top_k,
             )
             record.update(
@@ -466,7 +473,7 @@ def run_ds_coarse_recall(
             record["error"] = f"{type(exc).__name__}: {exc}"
             requests_failed += 1
         append_evidence(evidence_path, record)
-        completed_now, evidence_rows = _latest_coarse_results(evidence_path)
+        completed_now, evidence_rows = _latest_coarse_results(evidence_path, code_to_id)
         interim = {
             "input": len(units),
             "processed": len(completed_now),
@@ -481,7 +488,7 @@ def run_ds_coarse_recall(
             "labels": len(cards),
             "model": model,
             "method": "ds_all_label_paths",
-            "prompt_version": "coarse-all-paths-v1",
+            "prompt_version": "coarse-all-paths-v2",
         }
         _write_json_atomic(output_dir / "report.json", interim)
         print(
@@ -489,7 +496,7 @@ def run_ds_coarse_recall(
             flush=True,
         )
 
-    completed, evidence_rows = _latest_coarse_results(evidence_path)
+    completed, evidence_rows = _latest_coarse_results(evidence_path, code_to_id)
     candidate_path = output_dir / "candidates.jsonl"
     temporary = candidate_path.with_name(f".{candidate_path.name}.tmp")
     with temporary.open("w", encoding="utf-8", newline="\n") as output:
@@ -512,7 +519,7 @@ def run_ds_coarse_recall(
                     {
                         "question_id": question_id,
                         "method": "ds_all_label_paths",
-                        "retrieval_version": "ds-coarse-v1",
+                        "retrieval_version": "ds-coarse-v2",
                         "candidates": candidates,
                     },
                     ensure_ascii=False,
@@ -536,8 +543,8 @@ def run_ds_coarse_recall(
         "labels": len(cards),
         "model": model,
         "method": "ds_all_label_paths",
-        "retrieval_version": "ds-coarse-v1",
-        "prompt_version": "coarse-all-paths-v1",
+        "retrieval_version": "ds-coarse-v2",
+        "prompt_version": "coarse-all-paths-v2",
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report

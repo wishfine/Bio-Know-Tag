@@ -77,17 +77,19 @@ def test_coarse_prompt_uses_at_paths_and_not_teacher_definitions():
     assert "知识点@生物技术与工程@基因工程@基因表达载体的构建" in prompt
     assert "启动子控制转录起始" not in prompt
     assert '"question_id": "q1"' in prompt
+    assert '"code": "B001"' in prompt
+    assert '"label_id"' not in prompt
 
 
 def test_validate_coarse_result_requires_exact_questions_and_known_labels():
-    value = {"results": [{"question_id": "q1", "candidate_label_ids": ["L1", "L2"]}]}
-    assert validate_coarse_recall_result(value, ["q1"], {"L1", "L2"}, top_k=20) == value
+    value = {"results": [{"question_id": "q1", "candidate_codes": ["B001", "B002"]}]}
+    assert validate_coarse_recall_result(value, ["q1"], {"B001", "B002"}, top_k=20) == value
 
-    with pytest.raises(ValueError, match="unknown label_id"):
+    with pytest.raises(ValueError, match="unknown candidate code"):
         validate_coarse_recall_result(
-            {"results": [{"question_id": "q1", "candidate_label_ids": ["missing"]}]},
+            {"results": [{"question_id": "q1", "candidate_codes": ["missing"]}]},
             ["q1"],
-            {"L1", "L2"},
+            {"B001", "B002"},
             top_k=20,
         )
 
@@ -97,16 +99,34 @@ def test_validate_coarse_result_stably_deduplicates_candidates():
         "results": [
             {
                 "question_id": "q1",
-                "candidate_label_ids": ["L1", "L2", "L1", "L2"],
+                "candidate_codes": ["B001", "B002", "B001", "B002"],
             }
         ]
     }
 
     validated = validate_coarse_recall_result(
-        value, ["q1"], {"L1", "L2"}, top_k=20
+        value, ["q1"], {"B001", "B002"}, top_k=20
     )
 
-    assert validated["results"][0]["candidate_label_ids"] == ["L1", "L2"]
+    assert validated["results"][0]["candidate_codes"] == ["B001", "B002"]
+
+
+def test_validate_coarse_result_truncates_ranked_codes_to_top_k():
+    value = {
+        "results": [
+            {
+                "question_id": "q1",
+                "candidate_codes": ["B001", "B002", "B003"],
+            }
+        ]
+    }
+
+    validated = validate_coarse_recall_result(
+        value, ["q1"], {"B001", "B002", "B003"}, top_k=2
+    )
+
+    assert validated["results"][0]["candidate_codes"] == ["B001", "B002"]
+    assert validated["normalization"]["candidate_codes_truncated"] == 1
 
 
 def test_rrf_fuses_rankings_without_requiring_all_methods():
@@ -159,8 +179,8 @@ def test_run_ds_coarse_recall_batches_and_writes_at_paths(tmp_path: Path):
         content = json.dumps(
             {
                 "results": [
-                    {"question_id": "q1", "candidate_label_ids": ["L1", "L2"]},
-                    {"question_id": "q2", "candidate_label_ids": ["L2"]},
+                    {"question_id": "q1", "candidate_codes": ["B001", "B002"]},
+                    {"question_id": "q2", "candidate_codes": ["B002"]},
                 ]
             },
             ensure_ascii=False,
@@ -203,4 +223,4 @@ def test_run_ds_coarse_recall_batches_and_writes_at_paths(tmp_path: Path):
         for line in (output / "evidence.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert len(evidence) == 1
-    assert evidence[0]["prompt_version"] == "coarse-all-paths-v1"
+    assert evidence[0]["prompt_version"] == "coarse-all-paths-v2"
