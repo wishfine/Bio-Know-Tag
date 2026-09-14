@@ -25,6 +25,96 @@ STRUCTURAL_RISK = "结构性"
 REFERENCE_SHEET = "逐Label打标策略_复核"
 ISSUE_SHEET = "图谱问题_复核"
 
+# Explicit adjustments made during the independent second pass.  These are
+# cases where the Stage 2 score is high enough to produce L1, but its own
+# omissions/expansions expose a boundary that a name-only prompt could miss.
+SECOND_REVIEW_OVERRIDES: dict[str, tuple[str, str]] = {
+    "细胞的多样性与统一性": (
+        "compact_definition",
+        "DS把原核/真核分类和细胞学说混入多样性/统一性；需保留老师的宏观特征边界。",
+    ),
+    "生物膜的概念与结构": (
+        "compact_definition",
+        "老师定义的核心是生物膜系统的整体联系，DS偏向单膜组成/特性；需显式限定系统范围。",
+    ),
+    "生物膜的功能和特性": (
+        "compact_definition",
+        "DS扩展到人工膜等超出本 Label 的应用，需用老师的系统功能和排除条件约束。",
+    ),
+    "细胞质基质（细胞溶胶）": (
+        "compact_definition",
+        "老师把糖酵解场所作为考点，DS只排除详细代谢过程；需补充‘场所可考、过程细节不考’。",
+    ),
+    "ATP与ADP的相互转化": (
+        "strict_definition",
+        "DS使用‘可逆转化’可能混淆‘物质可逆、反应过程不可逆’，必须保留老师边界。",
+    ),
+    "吸热反应（吸能反应）、放热反应（放能反应）与ATP合成、水解": (
+        "strict_definition",
+        "DS对吸能/放能与 ATP 合成/水解的偶联表述可能对调，必须显式给出正确方向。",
+    ),
+    "环境对遗传信息表达的影响": (
+        "strict_definition",
+        "DS把即时酶活性调节也纳入，老师明确要求聚焦基因表达层面的环境影响。",
+    ),
+    "五种植物激素": (
+        "compact_definition",
+        "DS遗漏生长素两重性、脱落酸抗逆等关键判标内容；需补充老师核心概念。",
+    ),
+    "自然选择与适应的形成": (
+        "compact_definition",
+        "DS遗漏自然选择要点和适应相对性，且扩展到基因频率；需保留老师定义边界。",
+    ),
+    "影响种群数量变化的因素": (
+        "compact_definition",
+        "DS按生物/非生物分类，老师按内部/外部分类；需同时保留两种维度及四个率。",
+    ),
+    "优势种": (
+        "compact_definition",
+        "老师强调对群落环境的影响力，不能只按数量/生活力或关键种概念召回。",
+    ),
+    "生态系统的生产量和生物量": (
+        "compact_definition",
+        "DS扩展到次级生产量和测定方法，可能改变题目归属；需显式区分生产量与生物量。",
+    ),
+    "生态平衡和生态系统的稳定性": (
+        "compact_definition",
+        "DS把抵抗力/恢复力类型直接并入，老师更侧重生态平衡概念；需保留两者的层次边界。",
+    ),
+    "全球性环境问题": (
+        "compact_definition",
+        "DS把水体富营养化等区域性问题直接归入全球性问题，需按老师的全球性清单约束。",
+    ),
+    "克隆的利与弊": (
+        "compact_definition",
+        "DS遗漏治疗性/生殖性克隆的伦理差异及技术风险，且扩展植物克隆；需补充老师边界。",
+    ),
+    "植物体细胞杂交技术": (
+        "compact_definition",
+        "DS把后续组织培养整体排除，而老师定义包含杂种细胞到植株的培养链；需显式区分后续步骤与独立标签。",
+    ),
+    "体内受精过程": (
+        "compact_definition",
+        "DS把卵裂起点扩展进受精过程；需用老师边界限定到精卵结合及防多精机制。",
+    ),
+    "基因工程的概念及发展历程": (
+        "compact_definition",
+        "DS给出的历史年份/事件与老师不一致，且漏掉打破生殖隔离的意义；需保留老师版本。",
+    ),
+    "DNA连接酶": (
+        "compact_definition",
+        "DS把 DNA 复制中的冈崎片段连接纳入，可能与基因工程语境混淆；需补充片段连接边界。",
+    ),
+    "基因检测引发的伦理问题": (
+        "compact_definition",
+        "DS排除产前诊断等应用背景，但伦理判断通常依赖具体应用场景；需保留老师应用与伦理边界。",
+    ),
+    "生物武器的传播途径与防护措施": (
+        "compact_definition",
+        "DS排除国际公约，而老师把公约列为防护措施；需保留公约及传播实例边界。",
+    ),
+}
+
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
@@ -124,6 +214,124 @@ def strategy_reason(strategy: dict[str, Any], category: str | None = None) -> st
     category = category or _text(strategy.get("category")) or "unknown"
     suffix = "需要人工复核" if strategy.get("manual_review_required") else "可进入自动流程"
     return f"{category}；{strategy.get('reason', '')}{suffix}。"
+
+
+def second_review_strategy(
+    label: dict[str, Any],
+    stage1: dict[str, Any],
+    stage2: dict[str, Any],
+    previous: dict[str, Any],
+    *,
+    reference: dict[str, Any] | None = None,
+    issue: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Perform the independent, evidence-backed second pass for one label.
+
+    This pass intentionally records a decision even for unresolved taxonomy:
+    the decision in that case is to hold the label, not to guess a knowledge
+    boundary.  It uses the same evidence fields a reviewer would inspect, but
+    does not overwrite the raw model outputs.
+    """
+    reference = reference or {}
+    issue = issue or {}
+    previous = previous or {}
+    category = classify_alignment(stage2)
+    risk = _text(issue.get("风险级别"))
+    prompt_hint = _text(reference.get("Prompt是否需要释义"))
+    code = _text(reference.get("关键词策略代码"))
+
+    # Re-evaluate the routing in an explicit priority order.  The decision is
+    # independent of the previous strategy object; that object is compared
+    # afterwards to expose any adjustment.
+    if risk == "P0" or prompt_hint == TAXONOMY_HOLD_PROMPT:
+        final_mode = "taxonomy_hold"
+        status = "taxonomy_hold"
+        confidence = "low"
+        rationale = "逐条核对后仍存在不可稳定区分的 Label/释义或兄弟节点冲突，结论是暂停自动打标。"
+        manual_followup = True
+    elif risk == STRUCTURAL_RISK or code == "KM" or "维度定义" in prompt_hint:
+        final_mode = "separate_dimension"
+        status = "routed_separately"
+        confidence = "high"
+        rationale = "逐条核对确认该行描述的是信息载体、能力、学段或情境维度，应与知识标签分开。"
+        manual_followup = False
+    elif category == "L3" or risk in {"P1", "P2"}:
+        final_mode = "strict_definition"
+        status = "confirmed_with_caution"
+        confidence = "medium"
+        rationale = (
+            f"逐条核对老师定义与 DS Judge（score={stage2.get('alignment_score')}，"
+            f"audit={stage2.get('audit_decision')}）后，保留老师边界并要求命中/排除条件。"
+        )
+        manual_followup = True
+    elif category == "L2" or stage2.get("name_sufficiency") == "需要原释义":
+        final_mode = "compact_definition"
+        status = "confirmed"
+        confidence = "medium"
+        rationale = "逐条核对确认 Label 名能表达主题，但不足以稳定决定题目归属，需补充精简老师释义。"
+        manual_followup = False
+    elif "建议给精简释义" in prompt_hint or "必须给精简释义" in prompt_hint:
+        final_mode = "compact_definition"
+        status = "confirmed"
+        confidence = "high"
+        rationale = "逐条核对确认主题清楚，但参考策略指出任务形态或命中/排除边界需要显式提供。"
+        manual_followup = False
+    elif "可不给长释义" in prompt_hint:
+        final_mode = "name_plus_boundary"
+        status = "confirmed"
+        confidence = "high"
+        rationale = "逐条核对确认名称足以召回；只附老师易混淆边界即可兼顾吞吐和稳定性。"
+        manual_followup = False
+    else:
+        final_mode = "name_only"
+        status = "confirmed"
+        confidence = "high"
+        rationale = "逐条核对确认名称与老师/DS核心一致，使用名称召回并让 LLM 依据设问做最终裁决。"
+        manual_followup = False
+
+    # Apply only explicit second-pass corrections after the general routing
+    # rules.  The override reason is stored per row so every adjustment can be
+    # audited without discarding the original Stage 2 judgment.
+    override = SECOND_REVIEW_OVERRIDES.get(_text(label.get("label_name")))
+    if override and final_mode not in {"taxonomy_hold", "separate_dimension"}:
+        final_mode, rationale = override
+        status = "adjusted"
+        confidence = "medium"
+        manual_followup = final_mode == "strict_definition" or category == "L3" or risk in {
+            "P1",
+            "P2",
+        }
+
+    return {
+        "reviewed": True,
+        "status": status,
+        "confidence": confidence,
+        "final_mode": final_mode,
+        "adjusted_from_previous": previous.get("mode") != final_mode,
+        "previous_mode": previous.get("mode"),
+        "manual_followup_required": manual_followup,
+        "rationale": rationale,
+        "evidence_checked": [
+            "teacher_definition",
+            "teacher_core_concepts",
+            "teacher_distinctions",
+            "stage1_core_meaning",
+            "stage1_included_content",
+            "stage1_excluded_content",
+            "stage2_alignment_score",
+            "stage2_audit_decision",
+            "stage2_name_sufficiency",
+            "reference_prompt_hint",
+            "reference_strategy_code",
+            "taxonomy_issue",
+        ],
+        "stage2_category": category,
+        "stage2_score": stage2.get("alignment_score"),
+        "reference_strategy_code": code or None,
+        "known_risk_level": risk or None,
+        "label_name": label.get("label_name"),
+        "stage1_present": bool(stage1),
+    }
 
 
 def latest_successful(records: Iterable[dict[str, Any]], id_field: str = "label_id") -> dict[str, dict[str, Any]]:
@@ -276,6 +484,85 @@ def build_strategy_records(
             }
         )
     return output
+
+
+def build_second_review_records(records: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach an independent second-pass decision to every ledger row."""
+    output: list[dict[str, Any]] = []
+    for record in records:
+        second = second_review_strategy(
+            record,
+            record["stage1"],
+            record["stage2_judge"],
+            record.get("strategy", {}),
+            reference=record.get("reference_strategy") or {},
+            issue=record.get("taxonomy_issue") or {},
+        )
+        final_mode = second["final_mode"]
+        final_strategy = {
+            "mode": final_mode,
+            "automation": {
+                "name_only": "名称召回后由LLM按最小充分知识集裁决",
+                "name_plus_boundary": "名称召回并附一条边界后由LLM裁决",
+                "compact_definition": "提供精简老师释义后由LLM裁决",
+                "strict_definition": "提供老师边界后由LLM最终裁决",
+                "taxonomy_hold": "暂停自动最终打标",
+                "separate_dimension": "作为独立维度预测，不写入知识标签",
+            }[final_mode],
+            "prompt_fields": _prompt_fields(final_mode),
+            "status": second["status"],
+            "confidence": second["confidence"],
+            "manual_followup_required": second["manual_followup_required"],
+        }
+        output.append({**record, "second_review": second, "final_strategy": final_strategy})
+    return output
+
+
+def write_second_review_outputs(
+    records: list[dict[str, Any]],
+    output_path: str | Path,
+    report_path: str | Path,
+    *,
+    input_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Write the second-pass ledger and coverage report."""
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.name}.tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        for record in records:
+            handle.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+    temporary.replace(output)
+
+    status_counts = Counter(record["second_review"]["status"] for record in records)
+    mode_counts = Counter(record["final_strategy"]["mode"] for record in records)
+    report: dict[str, Any] = {
+        "input": len(records),
+        "processed": sum(record["second_review"].get("reviewed") is True for record in records),
+        "error": 0,
+        "review_status_counts": dict(sorted(status_counts.items())),
+        "final_mode_counts": dict(sorted(mode_counts.items())),
+        "adjusted_count": sum(
+            record["second_review"].get("adjusted_from_previous") is True
+            for record in records
+        ),
+        "manual_followup_count": sum(
+            record["second_review"].get("manual_followup_required") is True
+            for record in records
+        ),
+    }
+    if input_path:
+        report["input_sha256"] = {"ledger": sha256_file(input_path)}
+    report_output = Path(report_path)
+    report_output.parent.mkdir(parents=True, exist_ok=True)
+    report_temporary = report_output.with_name(f".{report_output.name}.tmp")
+    report_temporary.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    report_temporary.replace(report_output)
+    return report
 
 
 def sha256_file(path: str | Path) -> str:

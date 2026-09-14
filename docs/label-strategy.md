@@ -9,6 +9,8 @@
 - 已知图谱风险（`taxonomy_issue`）
 - 本项目最终采用的处理策略（`strategy`）
 
+`configs/label_strategies.review2.jsonl` 是在上述台账上的第二遍独立复核结果。它不覆盖原始证据，而是在每行增加 `second_review` 和 `final_strategy`；`second_review.adjusted_from_previous=true` 表示第二遍认为上一版路由需要收紧。
+
 ## 策略模式
 
 | `strategy.mode` | 处理方式 | 适用条件 |
@@ -20,7 +22,7 @@
 | `taxonomy_hold` | 暂停自动最终打标，先修订图谱或硬路由 | P0 或名称与释义冲突 |
 | `separate_dimension` | 作为信息载体、能力、学段、情境等独立维度存储 | 结构性风险或 KM 策略代码 |
 
-`stage2_category` 只是名称与释义的对齐结论，不会单独覆盖策略。比如一个 L1 Label 如果已知和兄弟节点重叠，仍会被提升为 `strict_definition`；P0 则直接进入 `taxonomy_hold`。
+`stage2_category` 只是名称与释义的对齐结论，不会单独覆盖策略。比如一个 L1 Label 如果已知和兄弟节点重叠，仍会被提升为 `strict_definition`；P0 则直接进入 `taxonomy_hold`。第二遍额外发现 21 个 L1 边界仍可能误导判标的 Label，并把它们收紧为 `compact_definition` 或 `strict_definition`。
 
 ## 重新生成
 
@@ -41,3 +43,12 @@ python scripts/build_label_strategies.py \
 ```
 
 报告中的 `manual_review_count` 是需要人工关注的行数，不等于失败数；`taxonomy_hold` 和 `separate_dimension` 要优先从自动知识标签流程中分流。
+
+第二遍复核（基于已生成的第一版台账）可运行：
+
+```bash
+python scripts/review_label_strategies.py \
+  --input configs/label_strategies.jsonl \
+  --output configs/label_strategies.review2.jsonl \
+  --report configs/label_strategies.review2.report.json
+```

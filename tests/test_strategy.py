@@ -1,4 +1,10 @@
-from bio_know_tag.strategy import build_strategy_records, choose_strategy, strategy_reason
+from bio_know_tag.strategy import (
+    build_second_review_records,
+    build_strategy_records,
+    choose_strategy,
+    second_review_strategy,
+    strategy_reason,
+)
 
 
 def _label(**overrides):
@@ -116,6 +122,75 @@ def test_l1_with_reference_request_for_compact_definition_uses_it():
 
     assert result["mode"] == "compact_definition"
     assert result["teacher_definition_required"] is True
+
+
+def test_second_review_records_a_final_decision_and_adjustment():
+    previous = {
+        "mode": "name_plus_boundary",
+        "manual_review_required": False,
+    }
+    review = second_review_strategy(
+        _label(),
+        _stage1(),
+        _stage2(),
+        previous,
+        reference={"关键词策略代码": "K1", "Prompt是否需要释义": "必须给精简释义：命中条件+排除条件"},
+    )
+
+    assert review["reviewed"] is True
+    assert review["final_mode"] == "compact_definition"
+    assert review["adjusted_from_previous"] is True
+    assert review["status"] == "confirmed"
+    assert review["confidence"] == "high"
+
+
+def test_second_review_keeps_taxonomy_hold_as_explicit_terminal_route():
+    review = second_review_strategy(
+        _label(label_name="蛋白质病毒的增殖"),
+        _stage1(),
+        _stage2(alignment_score=1, audit_decision="原释义更准确", name_sufficiency="需要原释义"),
+        {"mode": "strict_definition", "manual_review_required": True},
+        reference={"关键词策略代码": "KE", "Prompt是否需要释义": "先修图谱；当前释义不足以稳定区分"},
+        issue={"风险级别": "P0"},
+    )
+
+    assert review["final_mode"] == "taxonomy_hold"
+    assert review["status"] == "taxonomy_hold"
+    assert review["manual_followup_required"] is True
+
+
+def test_second_review_overrides_material_boundary_error_even_when_stage2_is_l1():
+    review = second_review_strategy(
+        _label(label_name="ATP与ADP的相互转化"),
+        _stage1(),
+        _stage2(),
+        {"mode": "name_plus_boundary", "manual_review_required": False},
+        reference={"关键词策略代码": "K2", "Prompt是否需要释义": "可不给长释义，但建议保留1句边界"},
+    )
+
+    assert review["final_mode"] == "strict_definition"
+    assert review["status"] == "adjusted"
+    assert review["manual_followup_required"] is True
+    assert "不可逆" in review["rationale"]
+
+
+def test_build_second_review_records_adds_final_strategy_without_losing_evidence():
+    label = _label()
+    first_pass = build_strategy_records(
+        [label],
+        {"1": {"label_id": "1", "parsed_response": _stage1()}},
+        {"1": {"label_id": "1", "category": "L1", "parsed_response": _stage2()}},
+        reference_by_id={
+            "1": {"关键词策略代码": "K1", "Prompt是否需要释义": "可不给长释义，但建议保留1句边界"}
+        },
+    )
+
+    reviewed = build_second_review_records(first_pass)
+
+    assert len(reviewed) == 1
+    assert reviewed[0]["stage2_judge"]["alignment_score"] == 5
+    assert reviewed[0]["second_review"]["reviewed"] is True
+    assert reviewed[0]["final_strategy"]["mode"] == "name_plus_boundary"
 
 
 def test_build_strategy_records_keeps_both_ds_stages_and_reference():
