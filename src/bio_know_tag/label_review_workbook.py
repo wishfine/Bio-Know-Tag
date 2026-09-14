@@ -82,6 +82,32 @@ FOLLOWUP_HEADERS = [
     "人工跟进原因",
 ]
 
+TEACHER_REVIEW_HEADERS = [
+    "序号",
+    "label_id",
+    "Label名称",
+    "Label路径",
+    "原释义（老师）",
+    "DS释义",
+    "DS Judge结果",
+    "请老师重点确认",
+    "老师复核结论",
+    "老师修改建议",
+]
+
+TEACHER_CONFIRMATIONS = {
+    "酶的特性": "是否将“作用条件较温和”纳入本Label；温度、pH影响是否归入本Label；“多样性”是否继续作为独立特性。",
+    "基于代谢类型对生物进行分类": "是否严格按碳源×能源划分四类；需氧型、厌氧型、兼性厌氧型是否排除；光能异养型是否属于高中考查范围。",
+    "光合作用综合": "是否包含化能合成作用、色素提取与分离实验及生态层面意义；满足什么条件才打“综合”（当前规则为覆盖至少4个子模块）。",
+    "其余伴性遗传疾病": "请确认疾病白名单：是否只排除红绿色盲、明确包含血友病；白名单之外的伴性遗传病是否命中。",
+    "RNA分子的种类与功能": "是否包含核酶；RNA与DNA的结构比较是否归入本Label；真核mRNA的5'帽和poly(A)尾是否超出范围。",
+    "蛋白质病毒的增殖": "Label名称与释义明显不一致。请确认是否改名为“RNA病毒及逆转录病毒的增殖”；若保留现名，请明确“蛋白质病毒”的含义。",
+    "遗传与变异综合": "是否限定为变异—遗传病—育种—进化的综合；孟德尔遗传规律和减数分裂是否纳入；满足什么条件才打“综合”。",
+    "生态系统的营养结构": "是否包含食物网复杂程度与生态系统稳定性的关系；数量、生物量和能量金字塔是否属于本Label。",
+    "蛋白质工程的进程与前景": "是否需要纳入蛋白质工程的基本定义与操作流程，还是严格限定为发展进程和应用前景。",
+    "基因工程综合": "是否包含蛋白质工程；安全性与伦理问题是否纳入；满足什么条件才打综合Label而不是单个子Label。",
+}
+
 
 def _plain(value: Any) -> str:
     if value is None or value == "":
@@ -249,7 +275,8 @@ def _detail_row(index: int, record: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_workbook_rows(records: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
-    detail = [_detail_row(index, record) for index, record in enumerate(records, 1)]
+    source_records = list(records)
+    detail = [_detail_row(index, record) for index, record in enumerate(source_records, 1)]
     summary = [
         {
             "序号": row["序号"],
@@ -314,7 +341,29 @@ def build_workbook_rows(records: Iterable[dict[str, Any]]) -> dict[str, list[dic
             1,
         )
     ]
-    return {"summary": summary, "detail": detail, "manual": manual}
+    source_by_id = {str(record.get("label_id", "")): record for record in source_records}
+    teacher_review = []
+    for row in detail:
+        record = source_by_id[row["label_id"]]
+        judge = record.get("stage2_judge") or {}
+        name = row["Label名称"]
+        if judge.get("audit_decision") != "两者都有问题" and name != "蛋白质病毒的增殖":
+            continue
+        teacher_review.append(
+            {
+                "序号": len(teacher_review) + 1,
+                "label_id": row["label_id"],
+                "Label名称": name,
+                "Label路径": row["Label路径"],
+                "原释义（老师）": _teacher_definition(record),
+                "DS释义": _ds_definition(record),
+                "DS Judge结果": _ds_judge(record),
+                "请老师重点确认": TEACHER_CONFIRMATIONS[name],
+                "老师复核结论": "",
+                "老师修改建议": "",
+            }
+        )
+    return {"summary": summary, "detail": detail, "manual": manual, "teacher_review": teacher_review}
 
 
 def _as_cell(value: Any) -> Any:
@@ -425,6 +474,7 @@ def _write_guide_sheet(workbook: Workbook) -> None:
         ("最终处理策略", "最终用于题目标注的路由。", "final_strategy"),
         ("问题分类", "把高风险行按 DS 差异、范围重叠、措辞风险、业务边界覆盖和名称/释义冲突分类。", "导出脚本"),
         ("人工跟进", "只列需要人工确认或治理的 Label，不代表整条数据处理失败。", "second_review.manual_followup_required"),
+        ("老师复核10项", "单列9个“两者都有问题”的Label和“蛋白质病毒的增殖”，预留老师结论与修改建议。", "Stage1 + Stage2 evidence"),
         ("数据范围", "本工作簿由 458 条 review2 台账记录导出。", "repo ledger"),
     ]
     for row in rows:
@@ -462,12 +512,44 @@ def write_workbook(records: Iterable[dict[str, Any]], output_path: str | Path) -
     _write_table_sheet(workbook, "逐Label详情", DETAIL_HEADERS, rows["detail"], "LabelReviewDetail", detail_widths)
     followup_widths = {"序号": 8, "label_id": 23, "Label名称": 30, "Label路径": 48, "问题分类": 28, "DS Judge类别": 12, "DS Judge分数": 10, "GPT Judge状态": 20, "最终处理策略": 22, "人工跟进原因": 72}
     _write_table_sheet(workbook, "人工跟进", FOLLOWUP_HEADERS, rows["manual"], "LabelReviewFollowup", followup_widths)
+    teacher_review_widths = {
+        "序号": 8,
+        "label_id": 23,
+        "Label名称": 30,
+        "Label路径": 48,
+        "原释义（老师）": 72,
+        "DS释义": 72,
+        "DS Judge结果": 72,
+        "请老师重点确认": 58,
+        "老师复核结论": 28,
+        "老师修改建议": 58,
+    }
+    teacher_sheet = _write_table_sheet(
+        workbook,
+        "老师复核10项",
+        TEACHER_REVIEW_HEADERS,
+        rows["teacher_review"],
+        "LabelTeacherReview",
+        teacher_review_widths,
+    )
+    teacher_sheet.freeze_panes = "E2"
+    teacher_sheet.sheet_view.zoomScale = 70
+    for row_index in range(2, teacher_sheet.max_row + 1):
+        teacher_sheet.row_dimensions[row_index].height = 260
+        for column_index in (9, 10):
+            teacher_sheet.cell(row_index, column_index).fill = PatternFill("solid", fgColor="DDEBF7")
     _write_summary_sheet(workbook, rows["detail"], rows["summary"])
     _write_guide_sheet(workbook)
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
     workbook.save(output)
-    return {"output": str(output), "rows": len(source_records), "manual_followup_rows": len(rows["manual"]), "sheets": workbook.sheetnames}
+    return {
+        "output": str(output),
+        "rows": len(source_records),
+        "manual_followup_rows": len(rows["manual"]),
+        "teacher_review_rows": len(rows["teacher_review"]),
+        "sheets": workbook.sheetnames,
+    }
 
 
 def _style_table_sheet(sheet, headers: list[str], rows: list[dict[str, Any]], table_name: str, widths: dict[str, int]) -> None:
