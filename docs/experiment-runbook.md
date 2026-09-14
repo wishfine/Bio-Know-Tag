@@ -274,3 +274,95 @@ error                               = 0
 - `duplicate_groups.jsonl`：完全相同内容的题目 ID 组及旧标签冲突状态。
 - `route_report.json`：R0/R1/R2、候选数量和未匹配旧 ID 的 dry-run 统计。
 - `build_report.json`：构建数量、精确去重和错误统计。
+
+## 12. 构建无旧标签依赖的Pilot样本（不调用DS）
+
+正式策略见 `docs/tagging-strategy.md`。Pilot抽样不会读取旧 `knw_ids` 进行分层，输出也会删除全部 `legacy_*` 和旧路由字段。
+
+先从全量派生文件头尾构造一个同时包含独立题和组合题的小型输入，验证命令和结构：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
+PILOT_SMOKE="runtime/$(date +%Y%m%d-%H%M%S)-pilot-sample-smoke"
+mkdir -p "$PILOT_SMOKE/input" "$PILOT_SMOKE/output"
+
+head -n 1000 "$UNIT_RUN/label_units.jsonl" \
+  > "$PILOT_SMOKE/input/label_units.sample.jsonl"
+tail -n 4000 "$UNIT_RUN/label_units.jsonl" \
+  >> "$PILOT_SMOKE/input/label_units.sample.jsonl"
+tail -n 1000 "$UNIT_RUN/parent_aggregation.jsonl" \
+  > "$PILOT_SMOKE/input/parent_aggregation.sample.jsonl"
+head -n 500 "$UNIT_RUN/duplicate_groups.jsonl" \
+  > "$PILOT_SMOKE/input/duplicate_groups.sample.jsonl"
+
+PYTHONPATH=src python scripts/build_pilot_sample.py \
+  --label-units "$PILOT_SMOKE/input/label_units.sample.jsonl" \
+  --parent-aggregation "$PILOT_SMOKE/input/parent_aggregation.sample.jsonl" \
+  --duplicate-groups "$PILOT_SMOKE/input/duplicate_groups.sample.jsonl" \
+  --run-dir "$PILOT_SMOKE/output" \
+  --target-size 300 \
+  --parent-groups 30 \
+  --duplicate-samples 20 \
+  --audit-sample-size 10 \
+  --stratum-sample-size 1
+
+python -m json.tool "$PILOT_SMOKE/output/pilot_report.json"
+wc -l "$PILOT_SMOKE/output"/*.jsonl
+```
+
+Smoke通过后，全量派生文件上后台构建约2,500条Pilot：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
+PILOT_RUN="runtime/$(date +%Y%m%d-%H%M%S)-pilot-sample-full"
+mkdir -p "$PILOT_RUN"
+printf '%s\n' "$PILOT_RUN" > runtime/LATEST_PILOT_RUN
+
+nohup env PYTHONPATH=src python scripts/build_pilot_sample.py \
+  --label-units "$UNIT_RUN/label_units.jsonl" \
+  --parent-aggregation "$UNIT_RUN/parent_aggregation.jsonl" \
+  --duplicate-groups "$UNIT_RUN/duplicate_groups.jsonl" \
+  --run-dir "$PILOT_RUN" \
+  --target-size 2500 \
+  --parent-groups 200 \
+  --duplicate-samples 100 \
+  --audit-sample-size 100 \
+  --stratum-sample-size 3 \
+  > "$PILOT_RUN/nohup.log" 2>&1 &
+PID=$!
+printf '%s\n' "$PID" > "$PILOT_RUN/pid"
+printf 'PILOT_RUN=%s PID=%s\n' "$PILOT_RUN" "$PID"
+```
+
+监控和验收：
+
+```bash
+PILOT_RUN="$(cat runtime/LATEST_PILOT_RUN)"
+tail -n 50 "$PILOT_RUN/nohup.log"
+ps -p "$(cat "$PILOT_RUN/pid")" -o pid,etime,stat,%cpu,%mem,command
+python -m json.tool "$PILOT_RUN/pilot_report.json"
+wc -l "$PILOT_RUN"/*.jsonl
+
+python -c 'import json,sys; bad=[]; f=open(sys.argv[1],encoding="utf-8"); exec("for line in f:\n r=json.loads(line); bad.extend(k for k in r if k.startswith(\"legacy_\") or k in {\"proposed_route\",\"route_reason\"})"); print({"legacy_fields_found":len(bad)}); raise SystemExit(bool(bad))' "$PILOT_RUN/pilot_units.jsonl"
+```
+
+必须确认：
+
+- `legacy_fields_used` 为 `false`；
+- `legacy_fields_found` 为0；
+- `pilot_units` 约为2,500（完整题组和必选异常样本可能使结果略高）；
+- `pilot_parent_groups` 为200或接近200；
+- `duplicate_groups_sampled` 为100；
+- 8个空题干全部进入 `empty_stem_units.jsonl`；
+- 同一个父题被选中时，其全部小题都在 `pilot_units.jsonl` 中。
+
+输出：
+
+- `pilot_units.jsonl`：后续召回和DS实验的主要输入。
+- `pilot_parents.jsonl`：Pilot中的完整真实父题组。
+- `duplicate_samples.jsonl`：100个精确重复组，每组附两个成员。
+- `image_context_samples.jsonl`：按题目类型抽取的图片风险题。
+- `empty_stem_units.jsonl`：全部空题干记录。
+- `pilot_report.json`：总体、题型、难度和抽样原因统计。

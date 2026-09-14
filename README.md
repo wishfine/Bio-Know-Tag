@@ -11,6 +11,7 @@
 - 逐 Label 策略台账：合并老师释义、两阶段 DS 结果和图谱风险，给出每个 Label 的生产路由；
 - 第二遍逐条复核：对边界误导项进行独立收紧，并输出 `configs/label_strategies.review2.jsonl`。
 - 打标前派生处理：在不修改 2.8 GB 清洗基线的前提下，展开独立题/小题、清洗答案、精确去重、生成真实父题聚合计划并统计 R0/R1/R2 路由。
+- 无旧标签Pilot抽样：按完整父题组、题型、难度、缺失状态和精确重复组确定性抽样，输出主动移除全部旧标签字段。
 
 DS 题目打标 Pilot 尚未开始。仓库不会用模型输出伪造金标；应先运行纯本地派生处理并核对真实路由规模。
 
@@ -58,3 +59,5 @@ python3 -m venv .venv
   --input configs/label_strategies.review2.jsonl \
   --output docs/label-review-table.md
 ```
+
+正式题目格式、无旧 `knw_ids` 的混合召回方案、DS裁决协议、父题聚合规则和Pilot口径见 [题库打标策略](docs/tagging-strategy.md)。
