@@ -11,10 +11,12 @@ from bio_know_tag.retrieval import (
     build_dense_label_text,
     build_dense_query_text,
     compare_candidate_runs,
+    quota_fuse_candidates,
     format_label_path,
     reciprocal_rank_fusion,
     run_ds_coarse_recall,
     run_dense_retrieval,
+    run_hybrid_retrieval,
     run_sparse_retrieval,
     validate_coarse_recall_result,
 )
@@ -355,3 +357,64 @@ def test_compare_candidate_runs_outputs_overlap_and_disagreement_samples(tmp_pat
     ]
     assert len(samples) == 1
     assert samples[0]["question_id"] == "q2"
+
+
+def test_quota_fusion_prioritizes_sparse_and_adds_dense_only_candidates():
+    sparse = [
+        {"label_id": "L1", "rank": 1, "score": 10.0},
+        {"label_id": "L2", "rank": 2, "score": 9.0},
+        {"label_id": "L3", "rank": 3, "score": 8.0},
+    ]
+    dense = [
+        {"label_id": "L2", "rank": 1, "score": 0.9},
+        {"label_id": "L4", "rank": 2, "score": 0.8},
+        {"label_id": "L5", "rank": 3, "score": 0.7},
+    ]
+
+    fused = quota_fuse_candidates(
+        sparse, dense, sparse_quota=2, dense_quota=2, top_k=4
+    )
+
+    assert [item["label_id"] for item in fused] == ["L1", "L2", "L4", "L5"]
+    assert fused[1]["sources"] == ["sparse", "dense"]
+    assert fused[2]["sources"] == ["dense"]
+    assert fused[3]["sources"] == ["dense"]
+
+
+def test_run_hybrid_retrieval_writes_25_candidate_sidecar(tmp_path: Path):
+    sparse_path = tmp_path / "sparse.jsonl"
+    dense_path = tmp_path / "dense.jsonl"
+    output = tmp_path / "hybrid"
+    sparse = {
+        "question_id": "q1",
+        "candidates": [
+            {"label_id": f"S{i}", "label_name": f"稀疏{i}", "label_path": f"知识点@稀疏{i}", "rank": i, "score": 100-i}
+            for i in range(1, 21)
+        ],
+    }
+    dense = {
+        "question_id": "q1",
+        "candidates": [
+            {"label_id": f"D{i}", "label_name": f"稠密{i}", "label_path": f"知识点@稠密{i}", "rank": i, "score": 1-i/100}
+            for i in range(1, 21)
+        ],
+    }
+    sparse_path.write_text(json.dumps(sparse, ensure_ascii=False) + "\n", encoding="utf-8")
+    dense_path.write_text(json.dumps(dense, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    report = run_hybrid_retrieval(
+        sparse_path,
+        dense_path,
+        output,
+        top_k=25,
+        sparse_quota=18,
+        dense_quota=7,
+    )
+
+    row = json.loads((output / "candidates.jsonl").read_text(encoding="utf-8"))
+    assert report["processed"] == 1
+    assert report["candidate_count_distribution"] == {"25": 1}
+    assert len(row["candidates"]) == 25
+    assert row["candidates"][0]["label_id"] == "S1"
+    assert row["candidates"][18]["label_id"] == "D1"
+    assert row["retrieval_version"] == "hybrid-v1-s18-d7-k25"

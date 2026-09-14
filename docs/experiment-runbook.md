@@ -531,3 +531,76 @@ wc -l "$COMPARE_RUN/disagreement_samples.jsonl"
 ```
 
 `top1_agreement_rate`、`mean_overlap_at_k`和`mean_jaccard_at_k`只表示两个召回器的重合度，不是准确率。必须检查 `disagreement_samples.jsonl` 或建立人工金标后，才能决定Dense是否进入生产流程。
+
+## 15. Top25配额融合与DS候选精判
+
+人工检查BM25/Dense最大分歧样本后，当前Pilot采用BM25主导的候选集：先保留BM25前18项，再加入Dense中前7个尚未出现的新Label，最终得到25项。若某一路不足，才使用RRF顺序补足。该配置是待验证的Pilot参数，不是生产参数。
+
+### 15.1 生成融合候选
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+PILOT_RUN="$(cat runtime/LATEST_PILOT_RUN)"
+SPARSE_RUN="$(cat runtime/LATEST_SPARSE_RECALL_RUN)"
+DENSE_RUN="$(cat runtime/LATEST_DENSE_RECALL_RUN)"
+HYBRID_RUN="runtime/$(date +%Y%m%d-%H%M%S)-hybrid-s18-d7-k25"
+
+mkdir -p "$HYBRID_RUN"
+printf '%s\n' "$HYBRID_RUN" > runtime/LATEST_HYBRID_RECALL_RUN
+
+PYTHONPATH=src python scripts/fuse_retrieval_candidates.py \
+  --sparse-candidates "$SPARSE_RUN/candidates.jsonl" \
+  --dense-candidates "$DENSE_RUN/candidates.jsonl" \
+  --run-dir "$HYBRID_RUN" \
+  --top-k 25 \
+  --sparse-quota 18 \
+  --dense-quota 7
+
+python -m json.tool "$HYBRID_RUN/report.json"
+wc -l "$HYBRID_RUN/candidates.jsonl"
+head -n 1 "$HYBRID_RUN/candidates.jsonl" | python -m json.tool
+```
+
+验收要求：`input=processed=2500`、`error=0`、候选数量分布应为25，且 `retrieval_version=hybrid-v1-s18-d7-k25`。
+
+### 15.2 运行10题DS精判smoke
+
+每道题单独调用一次DS，同时发送题目和25张老师Label Card。这里只使用9102服务：
+
+```bash
+export DS1='http://172.22.0.35:9102/v1/chat/completions'
+export MODEL='DeepSeek-V4-Flash'
+
+JUDGE_SMOKE="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-smoke"
+mkdir -p "$JUDGE_SMOKE"
+printf '%s\n' "$JUDGE_SMOKE" > runtime/LATEST_CANDIDATE_JUDGE_RUN
+
+PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --candidates "$HYBRID_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$JUDGE_SMOKE" \
+  --endpoint "$DS1" \
+  --limit 10 \
+  --max-tokens 1024
+
+python -m json.tool "$JUDGE_SMOKE/report.json"
+wc -l \
+  "$JUDGE_SMOKE/predictions.jsonl" \
+  "$JUDGE_SMOKE/evidence.jsonl" \
+  "$JUDGE_SMOKE/tail_selected.jsonl"
+```
+
+验收要求：`input=processed=success=10`、`error=pending=0`。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑成功记录。
+
+### 15.3 决定生产使用Top20还是Top25
+
+不能根据DS是否选择尾部候选直接证明尾部正确，也不能根据10题smoke决定候选上限。Smoke只验证接口、Prompt和产物。
+
+下一步从Pilot中分层运行至少200～300题，人工确认最终Label，并重点全审 `tail_selected.jsonl`：
+
+- 若第21～25位补回了人工确认的正确Label，或某类知识点系统性依赖该尾部，生产保留Top25。
+- 若人工确认尾部几乎只造成误选，且Top20没有明显漏标，生产降为Top20以缩短Prompt。
+- 同时检查 `need_expand_recall` 和“人工真值不在25项内”的比例；它们反映召回上限，而不是DS精判能力。
+
+最终应报告人工金标上的 `Recall@20`、`Recall@25`、两者增量、DS多打率、漏打率和每题平均标签数，再冻结生产参数。

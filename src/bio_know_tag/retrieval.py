@@ -790,3 +790,139 @@ def compare_candidate_runs(
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report
+
+
+def quota_fuse_candidates(
+    sparse_candidates: list[dict[str, Any]],
+    dense_candidates: list[dict[str, Any]],
+    *,
+    sparse_quota: int = 18,
+    dense_quota: int = 7,
+    top_k: int = 25,
+) -> list[dict[str, Any]]:
+    """Reserve BM25/Dense rank slots, then use RRF only to fill vacancies."""
+    if min(sparse_quota, dense_quota, top_k) < 0 or top_k < 1:
+        raise ValueError("quotas must be non-negative and top_k must be positive")
+    sparse_by_id = {str(item["label_id"]): item for item in sparse_candidates}
+    dense_by_id = {str(item["label_id"]): item for item in dense_candidates}
+    ordered_ids: list[str] = []
+    seen: set[str] = set()
+
+    def add(items: Iterable[dict[str, Any]]) -> None:
+        for item in items:
+            label_id = str(item["label_id"])
+            if label_id not in seen and len(ordered_ids) < top_k:
+                seen.add(label_id)
+                ordered_ids.append(label_id)
+
+    add(sparse_candidates[:sparse_quota])
+    dense_added = 0
+    for candidate in dense_candidates:
+        label_id = str(candidate["label_id"])
+        if label_id in seen:
+            continue
+        add([candidate])
+        dense_added += 1
+        if dense_added >= dense_quota or len(ordered_ids) >= top_k:
+            break
+    rrf = reciprocal_rank_fusion(
+        [list(sparse_by_id), list(dense_by_id)], top_k=len(seen) + top_k
+    )
+    add(
+        {"label_id": item["label_id"]}
+        for item in rrf
+        if item["label_id"] not in seen
+    )
+    add(sparse_candidates)
+    add(dense_candidates)
+
+    fused = []
+    for candidate_rank, label_id in enumerate(ordered_ids, 1):
+        sparse = sparse_by_id.get(label_id)
+        dense = dense_by_id.get(label_id)
+        source = sparse or dense or {"label_id": label_id}
+        fused.append(
+            {
+                "label_id": label_id,
+                "label_name": source.get("label_name", ""),
+                "label_path": format_label_path(source.get("label_path")),
+                "candidate_rank": candidate_rank,
+                "sources": [
+                    method
+                    for method, present in (("sparse", sparse), ("dense", dense))
+                    if present is not None
+                ],
+                "sparse_rank": sparse.get("rank") if sparse else None,
+                "sparse_score": sparse.get("score") if sparse else None,
+                "dense_rank": dense.get("rank") if dense else None,
+                "dense_score": dense.get("score") if dense else None,
+            }
+        )
+    return fused
+
+
+def run_hybrid_retrieval(
+    sparse_candidates_path: str | Path,
+    dense_candidates_path: str | Path,
+    run_dir: str | Path,
+    *,
+    top_k: int = 25,
+    sparse_quota: int = 18,
+    dense_quota: int = 7,
+) -> dict[str, Any]:
+    sparse = {
+        str(row["question_id"]): row for row in _read_objects(sparse_candidates_path)
+    }
+    dense = {
+        str(row["question_id"]): row for row in _read_objects(dense_candidates_path)
+    }
+    if set(sparse) != set(dense):
+        raise ValueError("sparse and dense runs must contain identical question IDs")
+    output_dir = Path(run_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "candidates.jsonl"
+    temporary = output_path.with_name(f".{output_path.name}.tmp")
+    candidate_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    version = f"hybrid-v1-s{sparse_quota}-d{dense_quota}-k{top_k}"
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        for question_id in sparse:
+            candidates = quota_fuse_candidates(
+                sparse[question_id].get("candidates") or [],
+                dense[question_id].get("candidates") or [],
+                sparse_quota=sparse_quota,
+                dense_quota=dense_quota,
+                top_k=top_k,
+            )
+            candidate_counts[str(len(candidates))] += 1
+            for candidate in candidates:
+                source_counts["+".join(candidate["sources"])] += 1
+            output.write(
+                json.dumps(
+                    {
+                        "question_id": question_id,
+                        "method": "sparse_dense_quota_fusion",
+                        "retrieval_version": version,
+                        "candidates": candidates,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            output.write("\n")
+    temporary.replace(output_path)
+    report = {
+        "input": len(sparse),
+        "processed": len(sparse),
+        "error": 0,
+        "top_k": top_k,
+        "sparse_quota": sparse_quota,
+        "dense_quota": dense_quota,
+        "retrieval_version": version,
+        "candidate_count_distribution": dict(
+            sorted(candidate_counts.items(), key=lambda item: int(item[0]))
+        ),
+        "candidate_source_counts": dict(sorted(source_counts.items())),
+    }
+    _write_json_atomic(output_dir / "report.json", report)
+    return report
