@@ -195,3 +195,82 @@ cp -n "$RUN/preprocess/questions.jsonl" \
 wc -l '/local_data/zhangyonglin/data/bio-know-tag/biology.cleaned.grouped.jsonl'
 sha256sum '/local_data/zhangyonglin/data/bio-know-tag/biology.cleaned.grouped.jsonl'
 ```
+
+## 11. 构建打标单元与 dry-run 路由（不调用 DS）
+
+现有 `questions.jsonl` 作为不可变基线。本步骤只在新的时间戳目录中生成派生文件。
+
+先运行 smoke；`--limit` 限制的是清洗文件的顶层记录数：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+FULL_RUN="$(cat runtime/LATEST_PREPROCESS_RUN)"
+AUDIT_RUN="$(cat runtime/LATEST_ORPHAN_AUDIT_RUN)"
+UNIT_SMOKE="runtime/$(date +%Y%m%d-%H%M%S)-label-units-smoke"
+mkdir -p "$UNIT_SMOKE"
+
+python scripts/build_label_units.py \
+  --input "$FULL_RUN/questions.jsonl" \
+  --labels configs/label_strategies.review2.jsonl \
+  --orphan-audit "$AUDIT_RUN/orphan_parents.jsonl" \
+  --run-dir "$UNIT_SMOKE" \
+  --limit 1000
+
+python -m json.tool "$UNIT_SMOKE/build_report.json"
+python -m json.tool "$UNIT_SMOKE/route_report.json"
+wc -l \
+  "$UNIT_SMOKE/label_units.jsonl" \
+  "$UNIT_SMOKE/parent_aggregation.jsonl" \
+  "$UNIT_SMOKE/duplicate_groups.jsonl"
+```
+
+抽查通过后后台运行全量，并立即保存 PID：
+
+```bash
+UNIT_RUN="runtime/$(date +%Y%m%d-%H%M%S)-label-units-full"
+mkdir -p "$UNIT_RUN"
+printf '%s\n' "$UNIT_RUN" > runtime/LATEST_LABEL_UNITS_RUN
+
+nohup python scripts/build_label_units.py \
+  --input "$FULL_RUN/questions.jsonl" \
+  --labels configs/label_strategies.review2.jsonl \
+  --orphan-audit "$AUDIT_RUN/orphan_parents.jsonl" \
+  --run-dir "$UNIT_RUN" \
+  > "$UNIT_RUN/nohup.log" 2>&1 &
+PID=$!
+printf '%s\n' "$PID" > "$UNIT_RUN/pid"
+printf 'UNIT_RUN=%s PID=%s\n' "$UNIT_RUN" "$PID"
+```
+
+监控及验收：
+
+```bash
+tail -n 50 "$UNIT_RUN/nohup.log"
+ps -p "$(cat "$UNIT_RUN/pid")" -o pid,etime,stat,command
+python -m json.tool "$UNIT_RUN/build_report.json"
+python -m json.tool "$UNIT_RUN/route_report.json"
+wc -l \
+  "$UNIT_RUN/label_units.jsonl" \
+  "$UNIT_RUN/parent_aggregation.jsonl" \
+  "$UNIT_RUN/duplicate_groups.jsonl"
+```
+
+全量关键验收口径：
+
+```text
+label_units                         = 1,857,591
+standalone_units                    = 1,033,000
+sub_question_units                  = 823,136
+orphan_sub_question_units           = 1,455
+real_compound_parents               = 219,741
+synthetic_parent_containers_skipped = 388
+error                               = 0
+```
+
+输出含义：
+
+- `label_units.jsonl`：独立题、正常小题和缺父题小题；缺父题小题只打自身知识点。
+- `parent_aggregation.jsonl`：仅 219,741 个真实组合题父题，供后续执行“小题 Label 并集 + 父题额外 Label”。
+- `duplicate_groups.jsonl`：完全相同内容的题目 ID 组及旧标签冲突状态。
+- `route_report.json`：R0/R1/R2、候选数量和未匹配旧 ID 的 dry-run 统计。
+- `build_report.json`：构建数量、精确去重和错误统计。
