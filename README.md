@@ -47,3 +47,13 @@ python3 -m venv .venv
 本地与服务器的 smoke/full 命令、PID 保存和验收步骤见 [实验运行手册](docs/experiment-runbook.md)。标签表初步检查见 [taxonomy 初审](docs/taxonomy-audit.md)。
 
 逐 Label 策略的字段含义、优先级和重新生成命令见 [Label 策略台账](docs/label-strategy.md)。
+
+## 逐 Label 复核文档
+
+完整的 458 行表格（老师原释义、DS 释义、DS Judge、GPT Judge 二次复核和最终处理策略）见 [Label 复核表](docs/label-review-table.md)。如需从最新台账重新导出：
+
+```bash
+.venv/bin/python scripts/export_label_review_markdown.py \
+  --input configs/label_strategies.review2.jsonl \
+  --output docs/label-review-table.md
+```
