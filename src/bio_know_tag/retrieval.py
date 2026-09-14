@@ -90,6 +90,34 @@ def build_query_tokens(unit: dict[str, Any]) -> list[str]:
     )
 
 
+def build_dense_label_text(card: dict[str, Any]) -> str:
+    """Compose the teacher-authoritative text embedded for one Label."""
+    clip = lambda value, size: str(value or "")[:size]
+    return "\n".join(
+        (
+            f"知识点名称：{clip(card.get('label_name'), 50)}",
+            f"知识点路径：{clip(format_label_path(card.get('label_path')), 100)}",
+            f"定义：{clip(card.get('definition'), 120)}",
+            f"核心概念：{clip(card.get('core_concepts'), 130)}",
+            f"易混淆边界：{clip(card.get('distinctions'), 80)}",
+        )
+    )
+
+
+def build_dense_query_text(unit: dict[str, Any]) -> str:
+    """Compose question text while keeping parent material visibly secondary."""
+    clip = lambda value, size: str(value or "")[:size]
+    return "\n".join(
+        (
+            f"当前题干：{clip(unit.get('stem'), 140)}",
+            f"答案：{clip(unit.get('answer_text'), 70)}",
+            f"解析：{clip(unit.get('analysis'), 170)}",
+            f"选项：{clip(unit.get('options'), 60)}",
+            f"父题公共材料（仅作语境）：{clip(unit.get('parent_stem'), 70)}",
+        )
+    )
+
+
 class BM25Retriever:
     """Small in-memory BM25 index for the 458 teacher Label Cards."""
 
@@ -545,6 +573,220 @@ def run_ds_coarse_recall(
         "method": "ds_all_label_paths",
         "retrieval_version": "ds-coarse-v2",
         "prompt_version": "coarse-all-paths-v2",
+    }
+    _write_json_atomic(output_dir / "report.json", report)
+    return report
+
+
+def run_dense_retrieval(
+    units_path: str | Path,
+    labels_path: str | Path,
+    run_dir: str | Path,
+    encoder: Any,
+    *,
+    top_k: int = 20,
+    batch_size: int = 64,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """Run a configurable dense encoder and write the standard candidate sidecar."""
+    if top_k < 1 or batch_size < 1:
+        raise ValueError("top_k and batch_size must be positive")
+    cards = build_label_cards(_read_objects(labels_path))
+    cards_by_id = {card["label_id"]: card for card in cards}
+    encoder.index(
+        [(card["label_id"], build_dense_label_text(card)) for card in cards]
+    )
+    output_dir = Path(run_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    candidate_path = output_dir / "candidates.jsonl"
+    temporary = candidate_path.with_name(f".{candidate_path.name}.tmp")
+    processed = 0
+    errors = 0
+    input_count = 0
+    error_records: list[dict[str, Any]] = []
+    started_at = datetime.now(timezone.utc).isoformat()
+    batch: list[dict[str, Any]] = []
+
+    def write_batch(output, units: list[dict[str, Any]]) -> tuple[int, int]:
+        if not units:
+            return 0, 0
+        try:
+            rankings = encoder.search(
+                [build_dense_query_text(unit) for unit in units], top_k=top_k
+            )
+            if len(rankings) != len(units):
+                raise ValueError("encoder returned wrong number of rankings")
+            serialized_records = []
+            for unit, ranking in zip(units, rankings):
+                candidates = []
+                seen: set[str] = set()
+                for label_id, score in ranking:
+                    label_id = str(label_id)
+                    if label_id in seen:
+                        continue
+                    if label_id not in cards_by_id:
+                        raise ValueError(f"encoder returned unknown label_id: {label_id}")
+                    seen.add(label_id)
+                    card = cards_by_id[label_id]
+                    candidates.append(
+                        {
+                            "label_id": label_id,
+                            "label_name": card["label_name"],
+                            "label_path": card["label_path"],
+                            "rank": len(candidates) + 1,
+                            "score": round(float(score), 8),
+                        }
+                    )
+                    if len(candidates) >= top_k:
+                        break
+                serialized_records.append(
+                    json.dumps(
+                        {
+                            "question_id": str(unit["question_id"]),
+                            "method": "dense_embedding",
+                            "retrieval_version": "dense-v1",
+                            "model": str(encoder.model_name),
+                            "candidates": candidates,
+                        },
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                )
+            for serialized in serialized_records:
+                output.write(serialized)
+                output.write("\n")
+            return len(units), 0
+        except Exception as exc:
+            error_records.append(
+                {
+                    "question_ids": [str(unit.get("question_id") or "") for unit in units],
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+            return 0, len(units)
+
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        for unit in _read_objects(units_path):
+            if limit is not None and input_count >= limit:
+                break
+            input_count += 1
+            if not unit.get("question_id"):
+                errors += 1
+                continue
+            batch.append(unit)
+            if len(batch) >= batch_size:
+                succeeded, failed = write_batch(output, batch)
+                processed += succeeded
+                errors += failed
+                batch.clear()
+                print(
+                    f"dense recall: input={input_count}, processed={processed}, error={errors}",
+                    flush=True,
+                )
+        succeeded, failed = write_batch(output, batch)
+        processed += succeeded
+        errors += failed
+    temporary.replace(candidate_path)
+    error_path = output_dir / "errors.jsonl"
+    error_temporary = error_path.with_name(f".{error_path.name}.tmp")
+    with error_temporary.open("w", encoding="utf-8", newline="\n") as output:
+        for record in error_records:
+            output.write(json.dumps(record, ensure_ascii=False, sort_keys=True))
+            output.write("\n")
+    error_temporary.replace(error_path)
+    report = {
+        "input": input_count,
+        "processed": processed,
+        "error": errors,
+        "top_k": top_k,
+        "batch_size": batch_size,
+        "labels": len(cards),
+        "method": "dense_embedding",
+        "retrieval_version": "dense-v1",
+        "model": str(encoder.model_name),
+        "error_batches": len(error_records),
+        "started_at": started_at,
+        "finished_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _write_json_atomic(output_dir / "report.json", report)
+    return report
+
+
+def compare_candidate_runs(
+    units_path: str | Path,
+    sparse_candidates_path: str | Path,
+    dense_candidates_path: str | Path,
+    run_dir: str | Path,
+    *,
+    top_k: int = 20,
+    sample_size: int = 200,
+) -> dict[str, Any]:
+    """Compare two retrieval rankings without pretending overlap is accuracy."""
+    units = {
+        str(unit["question_id"]): unit for unit in _read_objects(units_path)
+    }
+    sparse = {
+        str(row["question_id"]): row for row in _read_objects(sparse_candidates_path)
+    }
+    dense = {
+        str(row["question_id"]): row for row in _read_objects(dense_candidates_path)
+    }
+    common_ids = sorted(set(units) & set(sparse) & set(dense))
+    if not common_ids:
+        raise ValueError("candidate runs have no common questions")
+    comparisons = []
+    top1_agreement = 0
+    overlap_sum = 0
+    jaccard_sum = 0.0
+    for question_id in common_ids:
+        sparse_ids = [
+            str(item["label_id"])
+            for item in (sparse[question_id].get("candidates") or [])[:top_k]
+        ]
+        dense_ids = [
+            str(item["label_id"])
+            for item in (dense[question_id].get("candidates") or [])[:top_k]
+        ]
+        sparse_set = set(sparse_ids)
+        dense_set = set(dense_ids)
+        overlap = len(sparse_set & dense_set)
+        union = len(sparse_set | dense_set)
+        jaccard = overlap / union if union else 1.0
+        agrees = bool(sparse_ids and dense_ids and sparse_ids[0] == dense_ids[0])
+        top1_agreement += int(agrees)
+        overlap_sum += overlap
+        jaccard_sum += jaccard
+        comparisons.append(
+            {
+                "question_id": question_id,
+                "jaccard_at_k": jaccard,
+                "overlap_at_k": overlap,
+                "top1_agree": agrees,
+                "unit": units[question_id],
+                "sparse_candidates": sparse[question_id].get("candidates") or [],
+                "dense_candidates": dense[question_id].get("candidates") or [],
+            }
+        )
+    comparisons.sort(key=lambda row: (row["jaccard_at_k"], row["question_id"]))
+    output_dir = Path(run_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    sample_path = output_dir / "disagreement_samples.jsonl"
+    temporary = sample_path.with_name(f".{sample_path.name}.tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        for row in comparisons[:sample_size]:
+            output.write(json.dumps(row, ensure_ascii=False, sort_keys=True))
+            output.write("\n")
+    temporary.replace(sample_path)
+    question_count = len(common_ids)
+    report = {
+        "questions": question_count,
+        "top_k": top_k,
+        "top1_agreement": top1_agreement,
+        "top1_agreement_rate": round(top1_agreement / question_count, 6),
+        "mean_overlap_at_k": round(overlap_sum / question_count, 6),
+        "mean_jaccard_at_k": round(jaccard_sum / question_count, 6),
+        "disagreement_samples": min(sample_size, question_count),
+        "note": "排名重合度不是准确率；必须人工确认分歧样本后才能判断Dense是否有增益。",
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report

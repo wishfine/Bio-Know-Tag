@@ -443,3 +443,91 @@ head -n 1 "$COARSE_SMOKE/candidates.jsonl" | python -m json.tool
 DS粗召回v2在Prompt中使用 `B001` 至 `B458` 短代码，程序再映射为真实19位 `label_id`，避免模型抄错长ID。重复短代码会保持首次出现顺序去重，超过Top-K的尾部会截断；修复数量记录在evidence的 `parsed_response.normalization` 中。未知短代码、漏题或乱序仍按错误处理。v1与v2证据不能混用，升级后必须创建新的运行目录。
 
 DS粗召回全2,500条需等10题smoke人工查看后再启动。该结果不是金标，只是与BM25、Dense和混合召回比较的候选基线。
+
+项目当前决定不继续运行DS粗召回；代码和smoke仅作为历史基线保留。生产召回优先验证BM25与Dense。
+
+## 14. Dense Pilot与BM25分歧实验
+
+服务器的 `agentgym` 环境已有CUDA版PyTorch，但缺少Transformers。为避免污染既有环境，克隆为项目专用环境：
+
+```bash
+conda create \
+  --prefix /local_data/zhangyonglin/conda_envs/bio-know-tag-dense \
+  --clone /home/zhangyonglin/miniconda3/envs/agentgym \
+  -y
+
+DENSE_PY='/local_data/zhangyonglin/conda_envs/bio-know-tag-dense/bin/python'
+"$DENSE_PY" -m pip install 'transformers>=4.41,<5' 'safetensors>=0.4'
+```
+
+模型使用 `BAAI/bge-small-zh-v1.5`，约24M参数（模型卡：https://huggingface.co/BAAI/bge-small-zh-v1.5）。模型缓存放在项目同根数据目录：
+
+```bash
+export HF_HOME='/local_data/zhangyonglin/data/bio-know-tag/huggingface'
+mkdir -p "$HF_HOME"
+```
+
+先用GPU 0运行20题smoke：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+PILOT_RUN="$(cat runtime/LATEST_PILOT_RUN)"
+DENSE_SMOKE="runtime/$(date +%Y%m%d-%H%M%S)-dense-recall-smoke"
+mkdir -p "$DENSE_SMOKE"
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_dense_retrieval.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$DENSE_SMOKE" \
+  --model BAAI/bge-small-zh-v1.5 \
+  --device cuda:0 \
+  --top-k 20 \
+  --batch-size 128 \
+  --limit 20
+
+python -m json.tool "$DENSE_SMOKE/report.json"
+wc -l "$DENSE_SMOKE/candidates.jsonl"
+head -n 1 "$DENSE_SMOKE/candidates.jsonl" | python -m json.tool
+```
+
+Smoke通过后运行2,500题：
+
+```bash
+DENSE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-dense-recall-pilot"
+mkdir -p "$DENSE_RUN"
+printf '%s\n' "$DENSE_RUN" > runtime/LATEST_DENSE_RECALL_RUN
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_dense_retrieval.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$DENSE_RUN" \
+  --model BAAI/bge-small-zh-v1.5 \
+  --device cuda:0 \
+  --top-k 20 \
+  --batch-size 128
+
+python -m json.tool "$DENSE_RUN/report.json"
+wc -l "$DENSE_RUN/candidates.jsonl"
+```
+
+然后与已完成的BM25结果比较：
+
+```bash
+SPARSE_RUN="$(cat runtime/LATEST_SPARSE_RECALL_RUN)"
+COMPARE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-bm25-dense-compare"
+mkdir -p "$COMPARE_RUN"
+printf '%s\n' "$COMPARE_RUN" > runtime/LATEST_RETRIEVAL_COMPARE_RUN
+
+PYTHONPATH=src python scripts/compare_retrieval_runs.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --sparse-candidates "$SPARSE_RUN/candidates.jsonl" \
+  --dense-candidates "$DENSE_RUN/candidates.jsonl" \
+  --run-dir "$COMPARE_RUN" \
+  --top-k 20 \
+  --sample-size 200
+
+python -m json.tool "$COMPARE_RUN/report.json"
+wc -l "$COMPARE_RUN/disagreement_samples.jsonl"
+```
+
+`top1_agreement_rate`、`mean_overlap_at_k`和`mean_jaccard_at_k`只表示两个召回器的重合度，不是准确率。必须检查 `disagreement_samples.jsonl` 或建立人工金标后，才能决定Dense是否进入生产流程。

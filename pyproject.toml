@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<9"]
+dense = ["transformers>=4.41,<5", "safetensors>=0.4"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]
@@ -21,4 +22,3 @@ testpaths = ["tests"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
-

@@ -8,9 +8,13 @@ from bio_know_tag.retrieval import (
     build_coarse_recall_prompt,
     build_label_cards,
     build_query_tokens,
+    build_dense_label_text,
+    build_dense_query_text,
+    compare_candidate_runs,
     format_label_path,
     reciprocal_rank_fusion,
     run_ds_coarse_recall,
+    run_dense_retrieval,
     run_sparse_retrieval,
     validate_coarse_recall_result,
 )
@@ -224,3 +228,130 @@ def test_run_ds_coarse_recall_batches_and_writes_at_paths(tmp_path: Path):
     ]
     assert len(evidence) == 1
     assert evidence[0]["prompt_version"] == "coarse-all-paths-v2"
+
+
+def test_dense_texts_use_teacher_fields_and_question_context():
+    card = build_label_cards(_labels())[0]
+    label_text = build_dense_label_text(card)
+    query_text = build_dense_query_text(_unit())
+
+    assert "基因表达载体的构建" in label_text
+    assert "启动子控制转录起始" in label_text
+    assert "知识点@生物技术与工程" in label_text
+    assert "构建载体时" in query_text
+    assert "启动子使目的基因" in query_text
+    assert "现代生物科技专题" in query_text
+
+
+def test_run_dense_retrieval_uses_configurable_encoder_and_writes_sidecar(tmp_path: Path):
+    units_path = tmp_path / "pilot.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "dense"
+    units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
+    labels_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in _labels()),
+        encoding="utf-8",
+    )
+
+    class Encoder:
+        model_name = "fake-embedding"
+
+        def index(self, label_texts):
+            assert len(label_texts) == 2
+
+        def search(self, query_texts, *, top_k):
+            assert len(query_texts) == 1
+            assert top_k == 2
+            return [[("L1", 0.91), ("L2", 0.42)]]
+
+    report = run_dense_retrieval(
+        units_path,
+        labels_path,
+        output,
+        Encoder(),
+        top_k=2,
+        batch_size=8,
+    )
+
+    row = json.loads((output / "candidates.jsonl").read_text(encoding="utf-8"))
+    assert row["method"] == "dense_embedding"
+    assert row["candidates"][0]["label_id"] == "L1"
+    assert row["candidates"][0]["label_path"].count("->") == 0
+    assert report["input"] == report["processed"] == 1
+    assert report["error"] == 0
+    assert report["model"] == "fake-embedding"
+
+
+def test_run_dense_retrieval_keeps_failed_batch_out_of_candidates(tmp_path: Path):
+    units_path = tmp_path / "pilot.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "dense"
+    units_path.write_text(
+        "".join(json.dumps(_unit(qid), ensure_ascii=False) + "\n" for qid in ("q1", "q2")),
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in _labels()),
+        encoding="utf-8",
+    )
+
+    class Encoder:
+        model_name = "broken"
+
+        def index(self, label_texts):
+            return None
+
+        def search(self, query_texts, *, top_k):
+            return [[("L1", 0.9)], [("unknown", 0.8)]]
+
+    report = run_dense_retrieval(
+        units_path, labels_path, output, Encoder(), top_k=2, batch_size=2
+    )
+
+    assert report["processed"] == 0
+    assert report["error"] == 2
+    assert (output / "candidates.jsonl").read_text(encoding="utf-8") == ""
+    error = json.loads((output / "errors.jsonl").read_text(encoding="utf-8"))
+    assert error["question_ids"] == ["q1", "q2"]
+    assert "unknown label_id" in error["error"]
+
+
+def test_compare_candidate_runs_outputs_overlap_and_disagreement_samples(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    sparse_path = tmp_path / "sparse.jsonl"
+    dense_path = tmp_path / "dense.jsonl"
+    output = tmp_path / "compare"
+    units = [_unit("q1"), _unit("q2")]
+    units_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in units),
+        encoding="utf-8",
+    )
+    sparse = [
+        {"question_id": "q1", "candidates": [{"label_id": "L1"}, {"label_id": "L2"}]},
+        {"question_id": "q2", "candidates": [{"label_id": "L1"}, {"label_id": "L2"}]},
+    ]
+    dense = [
+        {"question_id": "q1", "candidates": [{"label_id": "L1"}, {"label_id": "L2"}]},
+        {"question_id": "q2", "candidates": [{"label_id": "L2"}, {"label_id": "L3"}]},
+    ]
+    sparse_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in sparse), encoding="utf-8"
+    )
+    dense_path.write_text(
+        "".join(json.dumps(row) + "\n" for row in dense), encoding="utf-8"
+    )
+
+    report = compare_candidate_runs(
+        units_path, sparse_path, dense_path, output, top_k=2, sample_size=1
+    )
+
+    assert report["questions"] == 2
+    assert report["top1_agreement"] == 1
+    assert report["top1_agreement_rate"] == 0.5
+    assert report["mean_overlap_at_k"] == 1.5
+    samples = [
+        json.loads(line)
+        for line in (output / "disagreement_samples.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(samples) == 1
+    assert samples[0]["question_id"] == "q2"
