@@ -366,3 +366,78 @@ python -c 'import json,sys; bad=[]; f=open(sys.argv[1],encoding="utf-8"); exec("
 - `image_context_samples.jsonl`：按题目类型抽取的图片风险题。
 - `empty_stem_units.jsonl`：全部空题干记录。
 - `pilot_report.json`：总体、题型、难度和抽样原因统计。
+
+## 13. Pilot候选召回第一阶段
+
+本阶段运行两个基线，均不读取旧 `knw_ids`：
+
+- `char_ngram_bm25`：纯本地中文字符bigram/trigram BM25，使用老师Label Card。
+- `ds_all_label_paths`：向DS发送全部458个Label的名称和`@`格式路径，不发送释义，粗召回Top 20。
+
+### 13.1 BM25 smoke与全量Pilot
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+PILOT_RUN="$(cat runtime/LATEST_PILOT_RUN)"
+SPARSE_SMOKE="runtime/$(date +%Y%m%d-%H%M%S)-sparse-recall-smoke"
+mkdir -p "$SPARSE_SMOKE"
+
+PYTHONPATH=src python scripts/run_sparse_retrieval.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$SPARSE_SMOKE" \
+  --top-k 20 \
+  --limit 20
+
+python -m json.tool "$SPARSE_SMOKE/report.json"
+wc -l "$SPARSE_SMOKE/candidates.jsonl"
+head -n 1 "$SPARSE_SMOKE/candidates.jsonl" | python -m json.tool
+```
+
+确认 `input=processed=20`、`error=0`，且所有 `label_path` 使用 `@` 后运行2,500条：
+
+```bash
+SPARSE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-sparse-recall-pilot"
+mkdir -p "$SPARSE_RUN"
+printf '%s\n' "$SPARSE_RUN" > runtime/LATEST_SPARSE_RECALL_RUN
+
+PYTHONPATH=src python scripts/run_sparse_retrieval.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$SPARSE_RUN" \
+  --top-k 20
+
+python -m json.tool "$SPARSE_RUN/report.json"
+wc -l "$SPARSE_RUN/candidates.jsonl"
+```
+
+### 13.2 DS全Label名称/路径粗召回smoke
+
+每个请求默认放5道题，Label目录只发送一次。先运行10道题：
+
+```bash
+export DS1='http://172.22.0.35:9092/v1/chat/completions'
+export DS2='http://172.22.0.35:9093/v1/chat/completions'
+export MODEL='DeepSeek-V4-Flash'
+
+COARSE_SMOKE="runtime/$(date +%Y%m%d-%H%M%S)-ds-coarse-smoke"
+mkdir -p "$COARSE_SMOKE"
+
+PYTHONPATH=src python scripts/run_ds_coarse_recall.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$COARSE_SMOKE" \
+  --endpoint "$DS1" \
+  --endpoint "$DS2" \
+  --top-k 20 \
+  --batch-size 5 \
+  --limit 10
+
+python -m json.tool "$COARSE_SMOKE/report.json"
+wc -l "$COARSE_SMOKE/candidates.jsonl" "$COARSE_SMOKE/evidence.jsonl"
+head -n 1 "$COARSE_SMOKE/candidates.jsonl" | python -m json.tool
+```
+
+验收要求：`input=processed=success=10`、`error=pending=0`、候选ID均属于458图谱、路径均使用`@`。相同 `--run-dir` 重跑时，已有成功题目会跳过，失败批次会继续重试。
+
+DS粗召回全2,500条需等10题smoke人工查看后再启动。该结果不是金标，只是与BM25、Dense和混合召回比较的候选基线。
