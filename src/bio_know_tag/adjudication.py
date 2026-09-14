@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,10 +73,13 @@ def build_adjudication_prompt(
 判标规则：
 1. 依据老师给出的定义、核心概念和易混淆边界；不要参考旧knw_ids。
 2. 只有正确解答当前设问需要调用的知识点才打；材料背景、实验工具、错误选项和干扰项不打。
-3. 不因为“相关”就多打。综合Label只有在题目确实要求多个子模块联动时才选。
-4. 可以选择多个候选，也可以一个都不选。若正确知识点可能未进入候选，设置need_expand_recall=true。
-5. 每个选中项必须给出题干、答案或解析中的直接证据。
-6. 只能返回C01等短代码，不能抄写长label_id。
+3. 逐个设问、填空或正确选项判断知识需求；一个Label可以覆盖时，不再追加其上位概念、背景知识或底层常识。
+4. 对每个准备选中的Label执行“删除测试”：删掉它以后，学生是否仍能仅凭其他已选Label完整回答对应设问？如果能，就不要选它。
+5. 不能因为答案中的某个名词属于一个大类就给大类打标。例如题目只问膜的基本骨架时，不能仅因答案是“磷脂”而追加脂质分类；普通的引入天敌或生物农药也不等于利用生态系统信息传递。
+6. 综合Label只有在题目确实要求多个子模块联动时才选。
+7. 可以选择多个候选，也可以一个都不选。若正确知识点可能未进入候选，设置need_expand_recall=true。
+8. 每个选中项的question_evidence必须逐字摘自本题的parent_stem、stem、options、answer_text或analysis，不能把Label释义、常识或推断伪装成题目证据；necessity说明该Label具体覆盖哪个设问。
+9. 只能返回C01等短代码，不能抄写长label_id。
 
 题目：
 {json.dumps(question, ensure_ascii=False)}
@@ -85,7 +89,7 @@ def build_adjudication_prompt(
 
 只输出一个JSON对象：
 {{
-  "selected": [{{"code": "C01", "evidence": "直接证据"}}],
+  "selected": [{{"code": "C01", "question_evidence": "题目中的原文短句", "necessity": "该Label具体覆盖的设问及不可删除原因"}}],
   "rejected_close_codes": ["容易混淆但不应命中的候选代码"],
   "none_of_candidates": false,
   "need_expand_recall": false,
@@ -96,7 +100,10 @@ def build_adjudication_prompt(
 
 
 def validate_adjudication_result(
-    value: dict[str, Any], known_codes: set[str]
+    value: dict[str, Any],
+    known_codes: set[str],
+    *,
+    question_evidence_text: str | None = None,
 ) -> dict[str, Any]:
     required = (
         "selected",
@@ -117,13 +124,27 @@ def validate_adjudication_result(
         if not isinstance(item, dict):
             raise ValueError("selected items must be objects")
         code = str(item.get("code") or "")
-        evidence = str(item.get("evidence") or "").strip()
+        evidence = str(item.get("question_evidence") or "").strip()
+        necessity = str(item.get("necessity") or "").strip()
         if code not in known_codes:
             raise ValueError(f"unknown selected code: {code}")
         if not evidence:
-            raise ValueError("selected evidence must be non-empty")
+            raise ValueError("selected question_evidence must be non-empty")
+        if not necessity:
+            raise ValueError("selected necessity must be non-empty")
+        if question_evidence_text is not None:
+            normalized_source = re.sub(r"\s+", "", question_evidence_text)
+            normalized_evidence = re.sub(r"\s+", "", evidence)
+            if normalized_evidence not in normalized_source:
+                raise ValueError("selected question_evidence is not quoted from the question")
         if code not in seen:
-            normalized.append({"code": code, "evidence": evidence})
+            normalized.append(
+                {
+                    "code": code,
+                    "question_evidence": evidence,
+                    "necessity": necessity,
+                }
+            )
             seen.add(code)
     value["selected"] = normalized
     rejected = value["rejected_close_codes"]
@@ -144,14 +165,20 @@ def validate_adjudication_result(
     return value
 
 
-def _latest_success(evidence_path: Path) -> tuple[dict[str, dict[str, Any]], int]:
+def _latest_success(
+    evidence_path: Path, *, prompt_version: str
+) -> tuple[dict[str, dict[str, Any]], int]:
     latest: dict[str, dict[str, Any]] = {}
     rows = 0
     if not evidence_path.exists():
         return latest, rows
     for record in _read_jsonl(evidence_path):
         rows += 1
-        if not record.get("error") and isinstance(record.get("parsed_response"), dict):
+        if (
+            record.get("prompt_version") == prompt_version
+            and not record.get("error")
+            and isinstance(record.get("parsed_response"), dict)
+        ):
             latest[str(record["question_id"])] = record
     return latest, rows
 
@@ -186,7 +213,8 @@ def run_adjudication(
     output_dir = Path(run_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "evidence.jsonl"
-    completed, _ = _latest_success(evidence_path)
+    prompt_version = "candidate-adjudication-v2"
+    completed, _ = _latest_success(evidence_path, prompt_version=prompt_version)
     requests_succeeded = 0
     requests_failed = 0
     for index, unit in enumerate(units, 1):
@@ -204,7 +232,7 @@ def run_adjudication(
         prompt, code_map = build_adjudication_prompt(unit, candidates, labels_by_id)
         record = {
             "stage": "candidate_adjudication",
-            "prompt_version": "candidate-adjudication-v1",
+            "prompt_version": prompt_version,
             "question_id": question_id,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "candidate_code_map": code_map,
@@ -237,14 +265,27 @@ def run_adjudication(
                 }
             )
             record["parsed_response"] = validate_adjudication_result(
-                parse_json_content(response.content), set(code_map)
+                parse_json_content(response.content),
+                set(code_map),
+                question_evidence_text="\n".join(
+                    str(unit.get(field) or "")
+                    for field in (
+                        "parent_stem",
+                        "stem",
+                        "options",
+                        "answer_text",
+                        "analysis",
+                    )
+                ),
             )
             requests_succeeded += 1
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"
             requests_failed += 1
         append_evidence(evidence_path, record)
-        completed, evidence_rows = _latest_success(evidence_path)
+        completed, evidence_rows = _latest_success(
+            evidence_path, prompt_version=prompt_version
+        )
         interim = {
             "input": len(units),
             "success": len(completed),
@@ -254,7 +295,7 @@ def run_adjudication(
             "requests_succeeded_this_run": requests_succeeded,
             "requests_failed_this_run": requests_failed,
             "model": model,
-            "prompt_version": "candidate-adjudication-v1",
+            "prompt_version": prompt_version,
         }
         _write_json_atomic(output_dir / "report.json", interim)
         print(
@@ -262,7 +303,9 @@ def run_adjudication(
             flush=True,
         )
 
-    completed, evidence_rows = _latest_success(evidence_path)
+    completed, evidence_rows = _latest_success(
+        evidence_path, prompt_version=prompt_version
+    )
     predictions_path = output_dir / "predictions.jsonl"
     temporary = predictions_path.with_name(f".{predictions_path.name}.tmp")
     tail_path = output_dir / "tail_selected.jsonl"
@@ -310,7 +353,8 @@ def run_adjudication(
                         "sources": candidate.get("sources", []),
                         "sparse_rank": candidate.get("sparse_rank"),
                         "dense_rank": candidate.get("dense_rank"),
-                        "evidence": item["evidence"],
+                        "evidence": item["question_evidence"],
+                        "necessity": item["necessity"],
                     }
                 )
             questions_using_tail += int(used_tail)
@@ -330,7 +374,7 @@ def run_adjudication(
                     "retrieval_version", ""
                 ),
                 "model": model,
-                "prompt_version": "candidate-adjudication-v1",
+                "prompt_version": prompt_version,
             }
             output.write(
                 json.dumps(prediction, ensure_ascii=False, sort_keys=True)
@@ -379,7 +423,7 @@ def run_adjudication(
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "model": model,
-        "prompt_version": "candidate-adjudication-v1",
+        "prompt_version": prompt_version,
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report

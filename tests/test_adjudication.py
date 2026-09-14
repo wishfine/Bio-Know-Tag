@@ -64,18 +64,41 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
 
 def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
     valid = {
-        "selected": [{"code": "C01", "evidence": "解析直接要求该知识"}],
+        "selected": [
+            {
+                "code": "C01",
+                "question_evidence": "解析",
+                "necessity": "覆盖当前设问",
+            }
+        ],
         "rejected_close_codes": ["C02"],
         "none_of_candidates": False,
         "need_expand_recall": False,
         "reason": "C01是完成设问所需的最小知识点。",
     }
-    assert validate_adjudication_result(valid, {"C01", "C02"}) == valid
+    assert validate_adjudication_result(
+        valid, {"C01", "C02"}, question_evidence_text="题干 答案 解析"
+    ) == valid
 
-    with pytest.raises(ValueError, match="evidence"):
+    with pytest.raises(ValueError, match="question_evidence"):
         validate_adjudication_result(
-            {**valid, "selected": [{"code": "C01", "evidence": ""}]},
+            {
+                **valid,
+                "selected": [
+                    {
+                        "code": "C01",
+                        "question_evidence": "",
+                        "necessity": "覆盖当前设问",
+                    }
+                ],
+            },
             {"C01", "C02"},
+        )
+    with pytest.raises(ValueError, match="not quoted"):
+        validate_adjudication_result(
+            valid,
+            {"C01", "C02"},
+            question_evidence_text="题干 答案",
         )
     with pytest.raises(ValueError, match="none_of_candidates"):
         validate_adjudication_result(
@@ -114,7 +137,13 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     class Response:
         content = json.dumps(
             {
-                "selected": [{"code": "C23", "evidence": "解析支持标签23"}],
+                "selected": [
+                    {
+                        "code": "C23",
+                        "question_evidence": "解析",
+                        "necessity": "该知识直接覆盖设问",
+                    }
+                ],
                 "rejected_close_codes": ["C01"],
                 "none_of_candidates": False,
                 "need_expand_recall": False,

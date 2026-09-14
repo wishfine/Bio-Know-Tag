@@ -538,11 +538,37 @@ wc -l "$COMPARE_RUN/disagreement_samples.jsonl"
 
 ### 15.1 生成融合候选
 
+如果BM25和Dense上游都只保留20项，二者高度重合时并集可能不足25。为了严格验证 `Recall@25`，先各自重跑Top30；耗时远低于DS精判：
+
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
 PILOT_RUN="$(cat runtime/LATEST_PILOT_RUN)"
-SPARSE_RUN="$(cat runtime/LATEST_SPARSE_RECALL_RUN)"
-DENSE_RUN="$(cat runtime/LATEST_DENSE_RECALL_RUN)"
+DENSE_PY='/local_data/zhangyonglin/conda_envs/bio-know-tag-dense/bin/python'
+DENSE_MODEL='/local_data/zhangyonglin/data/bio-know-tag/models/bge-small-zh-v1.5'
+
+SPARSE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-sparse-recall-top30"
+mkdir -p "$SPARSE_RUN"
+printf '%s\n' "$SPARSE_RUN" > runtime/LATEST_SPARSE_RECALL_30_RUN
+
+PYTHONPATH=src python scripts/run_sparse_retrieval.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$SPARSE_RUN" \
+  --top-k 30
+
+DENSE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-dense-recall-top30"
+mkdir -p "$DENSE_RUN"
+printf '%s\n' "$DENSE_RUN" > runtime/LATEST_DENSE_RECALL_30_RUN
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_dense_retrieval.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$DENSE_RUN" \
+  --model "$DENSE_MODEL" \
+  --device cuda:0 \
+  --top-k 30 \
+  --batch-size 128
+
 HYBRID_RUN="runtime/$(date +%Y%m%d-%H%M%S)-hybrid-s18-d7-k25"
 
 mkdir -p "$HYBRID_RUN"
@@ -561,7 +587,7 @@ wc -l "$HYBRID_RUN/candidates.jsonl"
 head -n 1 "$HYBRID_RUN/candidates.jsonl" | python -m json.tool
 ```
 
-验收要求：`input=processed=2500`、`error=0`、候选数量分布应为25，且 `retrieval_version=hybrid-v1-s18-d7-k25`。
+验收要求：`input=processed=2500`、`error=0`、Top30上游生成的融合候选数量分布应全部为25，且 `retrieval_version=hybrid-v1-s18-d7-k25`。此前直接融合两个Top20运行时出现的21～24项不是数据错误，而是两个有限候选集合的并集不足25；该结果不用于严格比较 `Recall@20` 与 `Recall@25`。
 
 ### 15.2 运行10题DS精判smoke
 
@@ -591,7 +617,7 @@ wc -l \
   "$JUDGE_SMOKE/tail_selected.jsonl"
 ```
 
-验收要求：`input=processed=success=10`、`error=pending=0`。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑成功记录。
+验收要求：`input=processed=success=10`、`error=pending=0`。精判v2要求每个证据都是题目、答案或解析中的可校验原文，并要求模型对每个Label执行“删除测试”，减少上位概念、底层常识和普通相关知识的多打。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
 
 ### 15.3 决定生产使用Top20还是Top25
 
