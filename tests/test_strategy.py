@@ -159,6 +159,35 @@ def test_second_review_keeps_taxonomy_hold_as_explicit_terminal_route():
     assert review["manual_followup_required"] is True
 
 
+def test_second_review_uses_existing_side_focus_for_mitosis_pair_without_teacher_followup():
+    for label_name, boundary in (
+        (
+            "观察根尖分生区组织细胞的有丝分裂",
+            "知识点考查（分裂时期、染色体变化、细胞计数）",
+        ),
+        (
+            "活动：观察细胞的有丝分裂",
+            "教材活动/实验操作（取材、解离、漂洗、染色、制片、显微镜观察）",
+        ),
+    ):
+        review = second_review_strategy(
+            _label(label_name=label_name),
+            _stage1(),
+            _stage2(),
+            {"mode": "taxonomy_hold", "manual_review_required": True},
+            reference={
+                "关键词策略代码": "KE",
+                "Prompt是否需要释义": "先修图谱；当前释义不足以稳定区分",
+            },
+            issue={"风险级别": "P0"},
+        )
+
+        assert review["final_mode"] == "strict_definition"
+        assert review["status"] == "adjusted"
+        assert review["manual_followup_required"] is False
+        assert boundary in review["operational_boundary"]
+
+
 def test_second_review_overrides_material_boundary_error_even_when_stage2_is_l1():
     review = second_review_strategy(
         _label(label_name="ATP与ADP的相互转化"),

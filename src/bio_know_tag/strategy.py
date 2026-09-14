@@ -115,6 +115,22 @@ SECOND_REVIEW_OVERRIDES: dict[str, tuple[str, str]] = {
     ),
 }
 
+# The teacher's own descriptions already provide an operational focus for
+# these two rows.  Keep the historical P0 issue as evidence, but do not block
+# production tagging: send the full teacher definition plus this side-focus
+# boundary to the classifier.  This is a routing decision, not a claim that
+# the two taxonomy rows are semantically disjoint in every question.
+OPERATIONAL_BOUNDARY_OVERRIDES: dict[str, str] = {
+    "观察根尖分生区组织细胞的有丝分裂": (
+        "知识点考查（分裂时期、染色体变化、细胞计数）；"
+        "与‘活动：观察细胞的有丝分裂’区分为教材实验操作侧重。"
+    ),
+    "活动：观察细胞的有丝分裂": (
+        "教材活动/实验操作（取材、解离、漂洗、染色、制片、显微镜观察）；"
+        "与‘观察根尖分生区组织细胞的有丝分裂’区分为知识点考查侧重。"
+    ),
+}
+
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) else ""
@@ -239,11 +255,23 @@ def second_review_strategy(
     risk = _text(issue.get("风险级别"))
     prompt_hint = _text(reference.get("Prompt是否需要释义"))
     code = _text(reference.get("关键词策略代码"))
+    operational_boundary = OPERATIONAL_BOUNDARY_OVERRIDES.get(
+        _text(label.get("label_name"))
+    )
 
     # Re-evaluate the routing in an explicit priority order.  The decision is
     # independent of the previous strategy object; that object is compared
     # afterwards to expose any adjustment.
-    if risk == "P0" or prompt_hint == TAXONOMY_HOLD_PROMPT:
+    if operational_boundary:
+        final_mode = "strict_definition"
+        status = "adjusted"
+        confidence = "medium"
+        rationale = (
+            "老师原释义已给出两个条目的侧重点，生产阶段采用完整老师释义并加入"
+            "侧重点边界；不要求老师逐条确认，但仍保留题面不可区分时的风险记录。"
+        )
+        manual_followup = False
+    elif risk == "P0" or prompt_hint == TAXONOMY_HOLD_PROMPT:
         final_mode = "taxonomy_hold"
         status = "taxonomy_hold"
         confidence = "low"
@@ -331,6 +359,7 @@ def second_review_strategy(
         "known_risk_level": risk or None,
         "label_name": label.get("label_name"),
         "stage1_present": bool(stage1),
+        "operational_boundary": operational_boundary,
     }
 
 
@@ -514,6 +543,8 @@ def build_second_review_records(records: Iterable[dict[str, Any]]) -> list[dict[
             "confidence": second["confidence"],
             "manual_followup_required": second["manual_followup_required"],
         }
+        if second.get("operational_boundary"):
+            final_strategy["operational_boundary"] = second["operational_boundary"]
         output.append({**record, "second_review": second, "final_strategy": final_strategy})
     return output
 

@@ -99,11 +99,17 @@ def _gpt_judge(record: dict[str, Any]) -> str:
 def _strategy(record: dict[str, Any]) -> str:
     final_strategy = record.get("final_strategy") or {}
     previous_strategy = record.get("strategy") or {}
+    review = record.get("second_review") or {}
     return _join_sections(
         _section("模式", final_strategy.get("mode")),
         _section("说明", final_strategy.get("reason") or previous_strategy.get("reason")),
         _section("自动化", final_strategy.get("automation") or previous_strategy.get("automation")),
         _section("Prompt字段", final_strategy.get("prompt_fields") or previous_strategy.get("prompt_fields")),
+        _section(
+            "业务边界",
+            final_strategy.get("operational_boundary")
+            or review.get("operational_boundary"),
+        ),
         _section(
             "需要老师释义",
             final_strategy.get("teacher_definition_required")
@@ -167,7 +173,9 @@ def _summary(records: list[dict[str, Any]]) -> list[str]:
     ]
 
 
-def _rules_section() -> list[str]:
+def _rules_section(records: list[dict[str, Any]]) -> list[str]:
+    statuses = Counter(str((record.get("second_review") or {}).get("status", "")) for record in records)
+    modes = Counter(str((record.get("final_strategy") or {}).get("mode", "")) for record in records)
     return [
         "## L1 / L2 / L3 是什么",
         "",
@@ -230,18 +238,18 @@ def _rules_section() -> list[str]:
         "",
         "- **confirmed**：逐条核对后确认原策略，无需额外人工跟进。",
         "- **confirmed_with_caution**：总体路由可用，但存在边界风险；当前统一收紧为 `strict_definition`，需要人工跟进。",
-        "- **adjusted**：二次复核发现原策略可能造成实质误标，已调整最终策略；本批共 21 个。",
-        "- **routed_separately**：这是题型/数据形式/能力等正交维度，不写入知识 Label，单独预测；本批共 12 个。",
-        "- **taxonomy_hold**：Label 与释义或兄弟节点无法稳定区分，暂停自动最终打标，先修 taxonomy；本批共 3 个。",
+        f"- **adjusted**：二次复核发现原策略可能造成实质误标，已调整最终策略；本批共 {statuses.get('adjusted', 0)} 个。",
+        f"- **routed_separately**：这是题型/数据形式/能力等正交维度，不写入知识 Label，单独预测；本批共 {statuses.get('routed_separately', 0)} 个。",
+        f"- **taxonomy_hold**：Label 与释义或兄弟节点无法稳定区分，暂停自动最终打标，先修 taxonomy；本批共 {statuses.get('taxonomy_hold', 0)} 个。",
         "",
         "## 最终处理策略",
         "",
         "- **name_only**：只用 Label 名做候选召回，再由 LLM 根据设问判断；本批最终数量为 0。",
-        "- **name_plus_boundary**：Label 名 + 老师的一条易混淆边界；兼顾吞吐与边界稳定性，本批 188 个。",
-        "- **compact_definition**：Label 名 + 老师定义/核心概念/易混淆区分等精简释义，本批 224 个。",
-        "- **strict_definition**：提供完整老师释义，并明确命中条件与排除条件；用于 L3 或 P1/P2/高风险边界，本批 31 个。",
-        "- **separate_dimension**：信息载体、题型、能力、来源等结构性维度与知识标签分开存储，本批 12 个。",
-        "- **taxonomy_hold**：不让模型猜，先修订 taxonomy 或使用来源字段硬路由，本批 3 个。",
+        f"- **name_plus_boundary**：Label 名 + 老师的一条易混淆边界；兼顾吞吐与边界稳定性，本批 {modes.get('name_plus_boundary', 0)} 个。",
+        f"- **compact_definition**：Label 名 + 老师定义/核心概念/易混淆区分等精简释义，本批 {modes.get('compact_definition', 0)} 个。",
+        f"- **strict_definition**：提供完整老师释义，并明确命中条件与排除条件；用于 L3 或 P1/P2/高风险边界，本批 {modes.get('strict_definition', 0)} 个。",
+        f"- **separate_dimension**：信息载体、题型、能力、来源等结构性维度与知识标签分开存储，本批 {modes.get('separate_dimension', 0)} 个。",
+        f"- **taxonomy_hold**：不让模型猜，先修订 taxonomy 或使用来源字段硬路由，本批 {modes.get('taxonomy_hold', 0)} 个。",
         "",
     ]
 
@@ -296,7 +304,7 @@ def build_markdown(records: Iterable[dict[str, Any]]) -> str:
         "",
         *_summary(source_records),
         "",
-        *_rules_section(),
+        *_rules_section(source_records),
         "## 逐 Label 复核表",
         "",
         "| " + " | ".join(MARKDOWN_HEADERS) + " |",

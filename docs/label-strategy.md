@@ -22,7 +22,7 @@
 | `taxonomy_hold` | 暂停自动最终打标，先修订图谱或硬路由 | P0 或名称与释义冲突 |
 | `separate_dimension` | 作为信息载体、能力、学段、情境等独立维度存储 | 结构性风险或 KM 策略代码 |
 
-`stage2_category` 只是名称与释义的对齐结论，不会单独覆盖策略。比如一个 L1 Label 如果已知和兄弟节点重叠，仍会被提升为 `strict_definition`；P0 则直接进入 `taxonomy_hold`。第二遍额外发现 21 个 L1 边界仍可能误导判标的 Label，并把它们收紧为 `compact_definition` 或 `strict_definition`。
+`stage2_category` 只是名称与释义的对齐结论，不会单独覆盖策略。比如一个 L1 Label 如果已知和兄弟节点重叠，仍会被提升为 `strict_definition`；P0 默认进入 `taxonomy_hold`。目前对 123/124 两个有丝分裂条目采用了业务侧重点边界（知识点考查 vs 教材实验操作），因此保留 P0 作为风险证据，但实际路由改为 `strict_definition`，不再要求老师额外确认。第二遍共调整 23 个 Label：其中 21 个是原有边界收紧，另外 2 个是上述业务边界覆盖；其余 P0 的“蛋白质病毒的增殖”仍保持 `taxonomy_hold`。
 
 ## 重新生成
 
