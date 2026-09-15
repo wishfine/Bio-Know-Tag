@@ -56,14 +56,35 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert code_map == {"C01": "L1", "C02": "L2"}
+    assert set(code_map.values()) == {"L1", "L2"}
     assert "C01" in prompt
     assert "标签一定义" in prompt
     assert "知识点@模块@标签一" in prompt
-    assert "旧knw_ids" in prompt
+    assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
     assert "允许知识范围重叠" in prompt
     assert "删除测试" not in prompt
+    assert '"parent_context_missing": false' in prompt
+    assert '"image_context_missing": false' in prompt
+    assert '"context_insufficient": false' in prompt
+
+
+def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
+    labels = {
+        f"L{index}": _label(f"L{index}", f"标签{index}")
+        for index in range(1, 4)
+    }
+    candidates = [_candidate(index) for index in range(1, 4)]
+
+    _, q1_first = build_adjudication_prompt(_unit(), candidates, labels)
+    _, q1_second = build_adjudication_prompt(_unit(), candidates, labels)
+    _, q2 = build_adjudication_prompt(
+        {**_unit(), "question_id": "q2"}, candidates, labels
+    )
+
+    assert q1_first == q1_second
+    assert list(q1_first.values()) != ["L1", "L2", "L3"]
+    assert list(q1_first.values()) != list(q2.values())
 
 
 def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
@@ -78,6 +99,7 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         "rejected_close_codes": ["C02"],
         "none_of_candidates": False,
         "need_expand_recall": False,
+        "context_insufficient": False,
         "reason": "C01是完成设问所需的最小知识点。",
     }
     validated = validate_adjudication_result(
@@ -121,6 +143,51 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         )
 
 
+@pytest.mark.parametrize(
+    ("selected", "none", "expand", "context", "valid"),
+    [
+        (
+            [{"code": "C01", "question_evidence": "题干", "necessity": "设问"}],
+            False,
+            False,
+            False,
+            True,
+        ),
+        (
+            [{"code": "C01", "question_evidence": "题干", "necessity": "设问"}],
+            False,
+            True,
+            False,
+            True,
+        ),
+        ([], True, True, False, True),
+        ([], True, False, True, True),
+        ([], True, False, False, False),
+        ([], False, True, False, False),
+    ],
+)
+def test_validate_adjudication_candidate_and_context_states(
+    selected, none, expand, context, valid
+):
+    value = {
+        "selected": selected,
+        "rejected_close_codes": [],
+        "none_of_candidates": none,
+        "need_expand_recall": expand,
+        "context_insufficient": context,
+        "reason": "依据",
+    }
+    if valid:
+        assert validate_adjudication_result(
+            value, {"C01"}, question_evidence_text="题干"
+        )["context_insufficient"] is context
+    else:
+        with pytest.raises(ValueError):
+            validate_adjudication_result(
+                value, {"C01"}, question_evidence_text="题干"
+            )
+
+
 def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     units_path = tmp_path / "units.jsonl"
     candidates_path = tmp_path / "candidates.jsonl"
@@ -128,6 +195,16 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     output = tmp_path / "judge"
     units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
     candidates = [_candidate(index) for index in range(1, 26)]
+    labels = {
+        f"L{index}": _label(f"L{index}", f"标签{index}")
+        for index in range(1, 26)
+    }
+    _, shuffled_code_map = build_adjudication_prompt(
+        _unit(), candidates, labels
+    )
+    code_for_l23 = next(
+        code for code, label_id in shuffled_code_map.items() if label_id == "L23"
+    )
     candidates_path.write_text(
         json.dumps(
             {
@@ -153,7 +230,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
             {
                 "selected": [
                     {
-                        "code": "C23",
+                        "code": code_for_l23,
                         "question_evidence": "解析",
                         "necessity": "该知识直接覆盖设问",
                     }
@@ -161,6 +238,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
                 "rejected_close_codes": ["C01"],
                 "none_of_candidates": False,
                 "need_expand_recall": False,
+                "context_insufficient": False,
                 "reason": "标签23最符合设问。",
             },
             ensure_ascii=False,
@@ -202,6 +280,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["selected_from_rank_21_25"] == 1
     assert report["questions_using_rank_21_25"] == 1
     assert report["need_expand_recall"] == 0
+    assert report["context_insufficient"] == 0
     assert report["token_usage"]["requests_with_usage"] == 1
     assert report["token_usage"]["mean_prompt_tokens"] == 100.0
     assert report["token_usage"]["mean_completion_tokens"] == 20.0
@@ -256,6 +335,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
                 "rejected_close_codes": [],
                 "none_of_candidates": False,
                 "need_expand_recall": False,
+                "context_insufficient": False,
                 "reason": "最小充分集合。",
             },
             ensure_ascii=False,

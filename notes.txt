@@ -27,3 +27,4 @@ Bio-Know-Tag Pilot实验记录
 - 根据业务决定，语义相关且均被设问直接考查的不同Label允许共存；Prompt v3取消严格删除测试，只排除上位概念、材料背景、底层常识和弱相关联想。
 - 从2,500题抽取300题：200题固定seed近似均匀抽样用于指标，100题覆盖风险与召回分歧用于压力审核。
 - DSClient修正并发端点轮询，确保9102/9103共同工作；evidence开始记录usage、reasoning、message keys和prompt字符数，报告汇总平均输入/输出token。
+- Prompt v4删除了未发送字段的旧knw_ids提示，按题目ID确定性打乱候选展示位置，细化错误选项和重叠Label规则，并以context_insufficient区分上下文缺失和候选召回缺失。300题必须使用新的v4运行目录。

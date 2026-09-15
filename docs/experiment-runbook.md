@@ -618,7 +618,7 @@ wc -l \
   "$JUDGE_SMOKE/tail_selected.jsonl"
 ```
 
-验收要求：`input=processed=success=10`、`error=pending=0`。精判v3输出所有被设问直接考查的Label，允许语义重叠，但排除上位概念、背景和弱相关联想。若证据语义可用但不是题内逐字子串，程序保留标签，并输出 `evidence_verified=false`、`needs_review=true`；这类情况计入报告的 `unverified_evidence_items` 和 `questions_with_unverified_evidence`，不再把整题判为失败。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应、usage和reasoning信息，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
+验收要求：`input=processed=success=10`、`error=pending=0`。精判v4输出所有被设问直接考查的Label，允许有独立考查依据的语义重叠，但排除无独立依据的上位概念、背景和弱相关联想。错误选项只有在判断其正误确实需要该知识时才计入；“综合/应用”Label可以正常命中，但不能作为宽泛兜底。候选发送前按 `question_id` 确定性打乱，消除C01与召回第一名固定绑定造成的位置偏置，程序仍保留原始候选排名。题目同时发送 `parent_context_missing` 和 `image_context_missing`，输出用 `context_insufficient` 将上下文缺失与候选召回缺失分开。若证据语义可用但不是题内逐字子串，程序保留标签，并输出 `evidence_verified=false`、`needs_review=true`；这类情况计入报告的 `unverified_evidence_items` 和 `questions_with_unverified_evidence`，不再把整题判为失败。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应、usage和reasoning信息，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
 
 ### 15.3 决定生产使用Top20还是Top25
 
@@ -700,4 +700,4 @@ wc -l "$AUDIT_DS_RUN/evidence.jsonl" \
   "$AUDIT_DS_RUN/tail_selected.jsonl"
 ```
 
-若服务中途失败，使用完全相同的运行目录和参数重跑；程序跳过同Prompt版本的成功题，只请求未完成题。完成标准为 `processed=success=300`、`error=pending=0`、evidence行数不少于300。审核时提交 `audit_units.jsonl`、`audit_candidates.jsonl`、`predictions.jsonl`、`evidence.jsonl` 和 `report.json`。
+若服务中途失败，使用完全相同的运行目录和参数重跑；程序跳过同Prompt版本的成功题，只请求未完成题。完成标准为 `processed=success=300`、`error=pending=0`、evidence行数不少于300，且 `prompt_version=candidate-adjudication-v4`。审核时提交 `audit_units.jsonl`、`audit_candidates.jsonl`、`predictions.jsonl`、`evidence.jsonl` 和 `report.json`。
