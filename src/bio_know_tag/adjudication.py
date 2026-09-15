@@ -440,8 +440,7 @@ def run_adjudication(
             none_count += int(parsed["none_of_candidates"])
             context_insufficient_count += int(parsed["context_insufficient"])
             needs_review = bool(
-                has_unverified_evidence
-                or parsed["need_expand_recall"]
+                parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
             )
             prediction = {

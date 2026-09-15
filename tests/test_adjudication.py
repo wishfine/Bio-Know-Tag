@@ -233,7 +233,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
                 "selected": [
                     {
                         "code": code_for_l23,
-                        "evidence": "解析",
+                        "evidence": "根据解析可知",
                     }
                 ],
                 "need_expand_recall": False,
@@ -293,11 +293,13 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["token_usage"]["mean_completion_tokens"] == 20.0
     assert report["requests_retried"] == 1
     assert report["retry_error_types"] == {"ConnectionResetError": 1}
-    assert report["unverified_evidence_items"] == 0
-    assert report["questions_with_unverified_evidence"] == 0
-    assert prediction["selected_labels"][0]["evidence_verified"] is True
+    assert report["unverified_evidence_items"] == 1
+    assert report["questions_with_unverified_evidence"] == 1
+    assert prediction["selected_labels"][0]["evidence_verified"] is False
     assert "necessity" not in prediction["selected_labels"][0]
     assert prediction["missing_knowledge"] == ""
+    # Evidence substring matching is diagnostic only. A semantically useful
+    # paraphrase must not create a manual-review task by itself.
     assert prediction["needs_review"] is False
     evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
     assert evidence["usage"]["total_tokens"] == 120
