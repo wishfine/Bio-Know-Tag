@@ -104,16 +104,25 @@ def build_dense_label_text(card: dict[str, Any]) -> str:
     )
 
 
+def _head_tail(value: Any, size: int) -> str:
+    """Keep both the setup and the actual request at the end of long fields."""
+    text = str(value or "")
+    if len(text) <= size:
+        return text
+    head_size = max(1, size // 3)
+    tail_size = max(1, size - head_size)
+    return f"{text[:head_size]}…[中间省略]…{text[-tail_size:]}"
+
+
 def build_dense_query_text(unit: dict[str, Any]) -> str:
-    """Compose question text while keeping parent material visibly secondary."""
-    clip = lambda value, size: str(value or "")[:size]
+    """Compose a compact query without dropping late subquestions or conclusions."""
     return "\n".join(
         (
-            f"当前题干：{clip(unit.get('stem'), 140)}",
-            f"答案：{clip(unit.get('answer_text'), 70)}",
-            f"解析：{clip(unit.get('analysis'), 170)}",
-            f"选项：{clip(unit.get('options'), 60)}",
-            f"父题公共材料（仅作语境）：{clip(unit.get('parent_stem'), 70)}",
+            f"当前题干：{_head_tail(unit.get('stem'), 260)}",
+            f"答案：{_head_tail(unit.get('answer_text'), 100)}",
+            f"解析：{_head_tail(unit.get('analysis'), 240)}",
+            f"选项：{_head_tail(unit.get('options'), 120)}",
+            f"父题公共材料（仅作语境）：{_head_tail(unit.get('parent_stem'), 100)}",
         )
     )
 
@@ -317,6 +326,14 @@ def _write_json_atomic(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def run_sparse_retrieval(
@@ -644,7 +661,7 @@ def run_dense_retrieval(
                         {
                             "question_id": str(unit["question_id"]),
                             "method": "dense_embedding",
-                            "retrieval_version": "dense-v1",
+                            "retrieval_version": "dense-v2-head-tail",
                             "model": str(encoder.model_name),
                             "candidates": candidates,
                         },
@@ -702,8 +719,22 @@ def run_dense_retrieval(
         "batch_size": batch_size,
         "labels": len(cards),
         "method": "dense_embedding",
-        "retrieval_version": "dense-v1",
+        "retrieval_version": "dense-v2-head-tail",
         "model": str(encoder.model_name),
+        "model_revision": getattr(encoder, "model_revision", None),
+        "model_commit_hash": getattr(encoder, "model_commit_hash", None),
+        "device": str(getattr(encoder, "device", "")),
+        "max_length": getattr(encoder, "max_length", None),
+        "query_instruction": getattr(encoder, "query_instruction", None),
+        "precision": "fp16" if getattr(encoder, "use_fp16", False) else "fp32",
+        "input_paths": {
+            "units": str(Path(units_path)),
+            "labels": str(Path(labels_path)),
+        },
+        "input_sha256": {
+            "units": _file_sha256(units_path),
+            "labels": _file_sha256(labels_path),
+        },
         "error_batches": len(error_records),
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
@@ -787,6 +818,154 @@ def compare_candidate_runs(
         "mean_jaccard_at_k": round(jaccard_sum / question_count, 6),
         "disagreement_samples": min(sample_size, question_count),
         "note": "排名重合度不是准确率；必须人工确认分歧样本后才能判断Dense是否有增益。",
+    }
+    _write_json_atomic(output_dir / "report.json", report)
+    return report
+
+
+def run_candidate_reranking(
+    units_path: str | Path,
+    labels_path: str | Path,
+    sparse_candidates_path: str | Path,
+    dense_candidates_path: str | Path,
+    run_dir: str | Path,
+    reranker: Any,
+    *,
+    sparse_pool: int = 30,
+    dense_pool: int = 30,
+    top_k: int = 30,
+) -> dict[str, Any]:
+    """Rerank the union of broad sparse and dense pools with a cross-encoder."""
+    if min(sparse_pool, dense_pool, top_k) < 1:
+        raise ValueError("pool sizes and top_k must be positive")
+    units = {str(row["question_id"]): row for row in _read_objects(units_path)}
+    labels = {
+        card["label_id"]: card
+        for card in build_label_cards(_read_objects(labels_path))
+    }
+    sparse_rows = list(_read_objects(sparse_candidates_path))
+    dense_rows = list(_read_objects(dense_candidates_path))
+    sparse = {str(row["question_id"]): row for row in sparse_rows}
+    dense = {str(row["question_id"]): row for row in dense_rows}
+    if set(units) != set(sparse) or set(units) != set(dense):
+        raise ValueError("units, sparse, and dense runs must contain identical question IDs")
+
+    output_dir = Path(run_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = output_dir / "candidates.jsonl"
+    temporary = output_path.with_name(f".{output_path.name}.tmp")
+    candidate_counts: Counter[str] = Counter()
+    pool_counts: Counter[str] = Counter()
+    source_counts: Counter[str] = Counter()
+    version = f"rerank-v1-s{sparse_pool}-d{dense_pool}-k{top_k}"
+    with temporary.open("w", encoding="utf-8", newline="\n") as output:
+        for index, (question_id, unit) in enumerate(units.items(), 1):
+            sparse_items = (sparse[question_id].get("candidates") or [])[:sparse_pool]
+            dense_items = (dense[question_id].get("candidates") or [])[:dense_pool]
+            sparse_by_id = {str(item["label_id"]): item for item in sparse_items}
+            dense_by_id = {str(item["label_id"]): item for item in dense_items}
+            pool_ids = list(sparse_by_id)
+            pool_ids.extend(label_id for label_id in dense_by_id if label_id not in sparse_by_id)
+            unknown = [label_id for label_id in pool_ids if label_id not in labels]
+            if unknown:
+                raise ValueError(f"candidate uses unknown label_id: {unknown[0]}")
+            query_text = build_dense_query_text(unit)
+            scores = reranker.score(
+                [(query_text, build_dense_label_text(labels[label_id])) for label_id in pool_ids]
+            )
+            if len(scores) != len(pool_ids):
+                raise ValueError("reranker returned wrong number of scores")
+            ordered = sorted(
+                zip(pool_ids, scores),
+                key=lambda item: (-float(item[1]), item[0]),
+            )[:top_k]
+            candidates = []
+            for rank, (label_id, score) in enumerate(ordered, 1):
+                sparse_item = sparse_by_id.get(label_id)
+                dense_item = dense_by_id.get(label_id)
+                card = labels[label_id]
+                sources = [
+                    method
+                    for method, present in (("sparse", sparse_item), ("dense", dense_item))
+                    if present is not None
+                ]
+                source_counts["+".join(sources)] += 1
+                candidates.append(
+                    {
+                        "label_id": label_id,
+                        "label_name": card["label_name"],
+                        "label_path": card["label_path"],
+                        "rank": rank,
+                        "candidate_rank": rank,
+                        "rerank_score": round(float(score), 8),
+                        "sources": sources,
+                        "sparse_rank": sparse_item.get("rank") if sparse_item else None,
+                        "sparse_score": sparse_item.get("score") if sparse_item else None,
+                        "dense_rank": dense_item.get("rank") if dense_item else None,
+                        "dense_score": dense_item.get("score") if dense_item else None,
+                    }
+                )
+            pool_counts[str(len(pool_ids))] += 1
+            candidate_counts[str(len(candidates))] += 1
+            output.write(
+                json.dumps(
+                    {
+                        "question_id": question_id,
+                        "method": "sparse_dense_cross_encoder_rerank",
+                        "retrieval_version": version,
+                        "candidate_pool_count": len(pool_ids),
+                        "candidates": candidates,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+            output.write("\n")
+            if index % 50 == 0 or index == len(units):
+                print(
+                    f"rerank: processed={index}/{len(units)}, pool={len(pool_ids)}, output={len(candidates)}",
+                    flush=True,
+                )
+    temporary.replace(output_path)
+    report = {
+        "input": len(units),
+        "processed": len(units),
+        "error": 0,
+        "sparse_pool": sparse_pool,
+        "dense_pool": dense_pool,
+        "top_k": top_k,
+        "model": str(reranker.model_name),
+        "model_revision": getattr(reranker, "model_revision", None),
+        "model_commit_hash": getattr(reranker, "model_commit_hash", None),
+        "device": str(getattr(reranker, "device", "")),
+        "batch_size": getattr(reranker, "batch_size", None),
+        "max_length": getattr(reranker, "max_length", None),
+        "precision": "fp16" if getattr(reranker, "use_fp16", False) else "fp32",
+        "method": "sparse_dense_cross_encoder_rerank",
+        "retrieval_version": version,
+        "upstream_retrieval_versions": {
+            "sparse": sorted({str(row.get("retrieval_version") or "") for row in sparse_rows}),
+            "dense": sorted({str(row.get("retrieval_version") or "") for row in dense_rows}),
+        },
+        "input_paths": {
+            "units": str(Path(units_path)),
+            "labels": str(Path(labels_path)),
+            "sparse_candidates": str(Path(sparse_candidates_path)),
+            "dense_candidates": str(Path(dense_candidates_path)),
+        },
+        "input_sha256": {
+            "units": _file_sha256(units_path),
+            "labels": _file_sha256(labels_path),
+            "sparse_candidates": _file_sha256(sparse_candidates_path),
+            "dense_candidates": _file_sha256(dense_candidates_path),
+        },
+        "pool_count_distribution": dict(
+            sorted(pool_counts.items(), key=lambda item: int(item[0]))
+        ),
+        "candidate_count_distribution": dict(
+            sorted(candidate_counts.items(), key=lambda item: int(item[0]))
+        ),
+        "candidate_source_counts": dict(sorted(source_counts.items())),
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report

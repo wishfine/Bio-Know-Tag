@@ -14,6 +14,7 @@ from bio_know_tag.retrieval import (
     quota_fuse_candidates,
     format_label_path,
     reciprocal_rank_fusion,
+    run_candidate_reranking,
     run_ds_coarse_recall,
     run_dense_retrieval,
     run_hybrid_retrieval,
@@ -245,6 +246,19 @@ def test_dense_texts_use_teacher_fields_and_question_context():
     assert "现代生物科技专题" in query_text
 
 
+def test_dense_query_keeps_the_end_of_a_long_question():
+    unit = {
+        **_unit(),
+        "stem": "背景" * 500 + "请绘制实验组的柱形图",
+        "analysis": "分析" * 500 + "最终需要比较数据变化趋势",
+    }
+
+    query_text = build_dense_query_text(unit)
+
+    assert "请绘制实验组的柱形图" in query_text
+    assert "最终需要比较数据变化趋势" in query_text
+
+
 def test_run_dense_retrieval_uses_configurable_encoder_and_writes_sidecar(tmp_path: Path):
     units_path = tmp_path / "pilot.jsonl"
     labels_path = tmp_path / "labels.jsonl"
@@ -282,6 +296,8 @@ def test_run_dense_retrieval_uses_configurable_encoder_and_writes_sidecar(tmp_pa
     assert report["input"] == report["processed"] == 1
     assert report["error"] == 0
     assert report["model"] == "fake-embedding"
+    assert report["retrieval_version"] == "dense-v2-head-tail"
+    assert len(report["input_sha256"]["units"]) == 64
 
 
 def test_run_dense_retrieval_keeps_failed_batch_out_of_candidates(tmp_path: Path):
@@ -418,3 +434,74 @@ def test_run_hybrid_retrieval_writes_25_candidate_sidecar(tmp_path: Path):
     assert row["candidates"][0]["label_id"] == "S1"
     assert row["candidates"][18]["label_id"] == "D1"
     assert row["retrieval_version"] == "hybrid-v1-s18-d7-k25"
+
+
+def test_candidate_reranking_unions_sparse_and_dense_before_top_k(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    sparse_path = tmp_path / "sparse.jsonl"
+    dense_path = tmp_path / "dense.jsonl"
+    output = tmp_path / "reranked"
+    units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
+    labels_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in _labels()),
+        encoding="utf-8",
+    )
+    sparse_path.write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "candidates": [
+                    {"label_id": "L1", "rank": 1, "score": 10.0},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    dense_path.write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "candidates": [
+                    {"label_id": "L2", "rank": 1, "score": 0.9},
+                    {"label_id": "L1", "rank": 2, "score": 0.8},
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class Reranker:
+        model_name = "fake-reranker"
+
+        def score(self, pairs):
+            assert len(pairs) == 2
+            return [0.2 if "基因表达载体" in label else 0.9 for _, label in pairs]
+
+    report = run_candidate_reranking(
+        units_path,
+        labels_path,
+        sparse_path,
+        dense_path,
+        output,
+        Reranker(),
+        sparse_pool=30,
+        dense_pool=30,
+        top_k=2,
+    )
+
+    row = json.loads((output / "candidates.jsonl").read_text(encoding="utf-8"))
+    assert [item["label_id"] for item in row["candidates"]] == ["L2", "L1"]
+    assert row["candidates"][0]["sources"] == ["dense"]
+    assert row["candidates"][1]["sources"] == ["sparse", "dense"]
+    assert row["retrieval_version"] == "rerank-v1-s30-d30-k2"
+    assert report["candidate_count_distribution"] == {"2": 1}
+    assert report["model"] == "fake-reranker"
+    assert report["upstream_retrieval_versions"] == {
+        "dense": [""],
+        "sparse": [""],
+    }
+    assert len(report["input_sha256"]["units"]) == 64
+    assert len(report["input_sha256"]["labels"]) == 64

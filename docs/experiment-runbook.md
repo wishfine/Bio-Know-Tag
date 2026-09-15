@@ -702,7 +702,115 @@ wc -l "$AUDIT_DS_RUN/evidence.jsonl" \
 
 若服务中途失败，使用完全相同的运行目录和参数重跑；程序跳过同Prompt版本的成功题，只请求未完成题。完成标准为 `processed=success=300`、`error=pending=0`、evidence行数不少于300，且 `prompt_version=candidate-adjudication-v4`。审核时提交 `audit_units.jsonl`、`audit_candidates.jsonl`、`predictions.jsonl`、`evidence.jsonl` 和 `report.json`。
 
-## 17. 紧凑精判v5与API重试审计
+## 17. Top30 与 Cross-Encoder Reranker 实验
+
+该实验只重跑300题的本地召回，不调用DS。比较两组新结果：
+
+- B：BM25 Top20 + Dense独有Top10，直接得到30个候选。
+- C：BM25 Top30和Dense Top30先取并集，再由`BAAI/bge-reranker-base`压到30个候选。
+
+Dense v2 对长字段使用“头部+尾部”，避免只保留题目背景而截掉末尾设问。先同步代码并恢复变量：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+DENSE_PY='/local_data/zhangyonglin/conda_envs/bio-know-tag-dense/bin/python'
+DENSE_MODEL='/local_data/zhangyonglin/data/bio-know-tag/models/bge-small-zh-v1.5'
+RERANK_MODEL_FILE='/local_data/zhangyonglin/data/bio-know-tag/models/bge-reranker-base.path'
+```
+
+若本机还没有reranker，只下载一次：
+
+```bash
+"$DENSE_PY" -c 'from huggingface_hub import snapshot_download; print(snapshot_download(repo_id="BAAI/bge-reranker-base", cache_dir="/local_data/zhangyonglin/data/bio-know-tag/models/hf-cache"))' > "$RERANK_MODEL_FILE"
+
+RERANK_MODEL="$(cat "$RERANK_MODEL_FILE")"
+printf 'RERANK_MODEL=%s\n' "$RERANK_MODEL"
+```
+
+在同一300题上重新产生两路Top30：
+
+```bash
+SPARSE30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-audit-sparse30"
+mkdir -p "$SPARSE30_RUN"
+
+PYTHONPATH=src python scripts/run_sparse_retrieval.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$SPARSE30_RUN" \
+  --top-k 30
+
+DENSE30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-audit-dense30-v2"
+mkdir -p "$DENSE30_RUN"
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_dense_retrieval.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$DENSE30_RUN" \
+  --model "$DENSE_MODEL" \
+  --device cuda:0 \
+  --top-k 30 \
+  --batch-size 128 \
+  --local-files-only
+```
+
+生成直接Top30基线：
+
+```bash
+HYBRID30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-audit-hybrid-s20-d10-k30"
+mkdir -p "$HYBRID30_RUN"
+
+PYTHONPATH=src python scripts/fuse_retrieval_candidates.py \
+  --sparse-candidates "$SPARSE30_RUN/candidates.jsonl" \
+  --dense-candidates "$DENSE30_RUN/candidates.jsonl" \
+  --run-dir "$HYBRID30_RUN" \
+  --top-k 30 \
+  --sparse-quota 20 \
+  --dense-quota 10
+```
+
+生成reranker Top30：
+
+```bash
+RERANK30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-audit-rerank30"
+mkdir -p "$RERANK30_RUN"
+printf '%s\n' "$RERANK30_RUN" > runtime/LATEST_RERANK30_RUN
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_candidate_reranking.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --sparse-candidates "$SPARSE30_RUN/candidates.jsonl" \
+  --dense-candidates "$DENSE30_RUN/candidates.jsonl" \
+  --run-dir "$RERANK30_RUN" \
+  --model "$RERANK_MODEL" \
+  --device cuda:0 \
+  --sparse-pool 30 \
+  --dense-pool 30 \
+  --top-k 30 \
+  --batch-size 64 \
+  --local-files-only
+
+python -m json.tool "$RERANK30_RUN/report.json"
+wc -l "$RERANK30_RUN/candidates.jsonl"
+```
+
+分别检查三个目标题。第二题按当前458体系使用其最接近且已包含“外来物种入侵”的上位Label：
+
+```bash
+for RUN in "$HYBRID30_RUN" "$RERANK30_RUN"; do
+  PYTHONPATH=src python scripts/check_recall_targets.py \
+    --candidates "$RUN/candidates.jsonl" \
+    --target '2590460368220094467=数据图像类' \
+    --target '2327487096614821888=生物多样性丧失的原因及保护措施' \
+    --target '2964930689699446802=扩散作用与渗透作用及相应实验' || true
+done
+```
+
+只有reranker结果三项全部`hit=true`，并经人工抽查没有明显挤掉原来正确候选，才进入DS精判复测。`|| true`只用于让两个对比检查都能打印，不代表验收通过。
+
+## 18. 紧凑精判v5与API重试审计
 
 v4的300题审核运行保留为基线，不在运行中切换Prompt。v5用于后续实验，删除 `rejected_close_codes`、逐Label的 `necessity`、全局 `reason`，并由程序根据 `selected` 是否为空推导 `none_of_candidates`。模型只输出：
 

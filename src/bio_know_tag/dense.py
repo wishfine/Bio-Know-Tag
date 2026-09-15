@@ -19,6 +19,7 @@ class TransformerDenseRetriever:
         encode_batch_size: int = 128,
         max_length: int = 512,
         query_instruction: str = DEFAULT_QUERY_INSTRUCTION,
+        revision: str | None = None,
         local_files_only: bool = False,
         use_fp16: bool = True,
     ) -> None:
@@ -35,13 +36,16 @@ class TransformerDenseRetriever:
         self.encode_batch_size = encode_batch_size
         self.max_length = max_length
         self.query_instruction = query_instruction
+        self.model_revision = revision
+        self.use_fp16 = bool(use_fp16 and self.device.type == "cuda")
         self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name, local_files_only=local_files_only
+            model_name, revision=revision, local_files_only=local_files_only
         )
         self.model = AutoModel.from_pretrained(
-            model_name, local_files_only=local_files_only
+            model_name, revision=revision, local_files_only=local_files_only
         ).to(self.device)
-        if use_fp16 and self.device.type == "cuda":
+        self.model_commit_hash = getattr(self.model.config, "_commit_hash", None)
+        if self.use_fp16:
             self.model = self.model.half()
         self.model.eval()
         self.label_ids: list[str] = []
