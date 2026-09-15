@@ -16,9 +16,9 @@
 - Dense Pilot：支持可配置Transformers embedding精确余弦召回，并输出BM25/Dense重合度与最大分歧样本。
 - 混合候选与精判：支持BM25主导的18+7配额融合及DS直接考查Label裁决，并统计第21～25名候选的实际命中情况。
 - 人工审核样本：从2,500题中确定性抽取200题近似均匀指标集和100题覆盖导向压力集，保持题目与候选严格对齐。
-- 紧凑精判输出：v5仅生成Label短代码、最短题内证据及两类缺失状态，并记录API重试原因与Token用量。
+- 精判对比：已完成同一300题的v4/v6运行与逐题复核；v7改为合理多标可保留、禁止跨考查维度替代，并仅输出Label短代码及两类缺失状态。
 
-DS 题目打标 Pilot 尚未开始。仓库不会用模型输出伪造金标；应先运行纯本地派生处理并核对真实路由规模。
+DS 题目打标 Pilot 已完成v4和v6，v7待在原300题上复测。仓库不会把未经人工审核的模型输出冒充金标。
 
 ## 目录
 
@@ -52,6 +52,8 @@ python3 -m venv .venv
 ## 运行
 
 本地与服务器的 smoke/full 命令、PID 保存和验收步骤见 [实验运行手册](docs/experiment-runbook.md)。标签表初步检查见 [taxonomy 初审](docs/taxonomy-audit.md)。
+
+从数据清洗、Label 理解到 BM25/Dense 召回和 v4/v6/v7 精判的完整进展、结论与下一步见 [实验进展总结](docs/experiment-progress-summary.md)。
 
 逐 Label 策略的字段含义、优先级和重新生成命令见 [Label 策略台账](docs/label-strategy.md)。
 
