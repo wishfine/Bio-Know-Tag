@@ -902,6 +902,7 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --timeout 300 \
   --retries 5 \
   --retry-delay 1 \
+  --request-interval 2 \
   --max-tokens 512 \
   > "$V6_RUN/nohup.log" 2>&1 &
 
@@ -918,5 +919,7 @@ python -m json.tool "$V6_RUN/report.json"
 python -m json.tool "$V6_RUN/run_manifest.json"
 wc -l "$V6_RUN/predictions.jsonl" "$V6_RUN/evidence.jsonl"
 ```
+
+`--request-interval 2`表示所有worker共享一个请求启动节流器，任意两个HTTP尝试的启动时间至少间隔2秒，避免线程池启动和同步重试形成瞬时连接惊群；它不限制服务端同时处理的在途请求数。失败记录会保存真实的`attempts`、最后`endpoint`、总延迟及每次`retry_errors`。
 
 完成标准：`input=processed=success=300`、`error=pending=0`、`prompt_version=candidate-adjudication-v6-precision-first`、`candidate_retrieval_versions=["hybrid-v1-s18-d7-k25"]`、`candidate_count_distribution={"25":300}`。`run_manifest.json`绑定题目、候选、Label文件哈希与模型参数；同目录恢复运行时若任何关键输入变化，程序会拒绝混跑。优先人工复核`usable_for_training=true`的非空结果是否存在错标；空结果、扩召和上下文不足结果直接过滤，不以漏标率作为本轮失败标准。

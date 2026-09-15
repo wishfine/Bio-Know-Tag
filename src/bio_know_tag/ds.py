@@ -46,6 +46,25 @@ class DSResponse:
     retry_errors: tuple[dict[str, Any], ...] = ()
 
 
+class DSRequestError(RuntimeError):
+    """Terminal request failure with diagnostics from every HTTP attempt."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts: int,
+        endpoint: str,
+        latency_seconds: float,
+        retry_errors: Iterable[dict[str, Any]],
+    ) -> None:
+        super().__init__(message)
+        self.attempts = attempts
+        self.endpoint = endpoint
+        self.latency_seconds = latency_seconds
+        self.retry_errors = tuple(retry_errors)
+
+
 class DSClient:
     """Small retrying client for an OpenAI-compatible chat-completions API."""
 
@@ -57,18 +76,35 @@ class DSClient:
         timeout: float = 120,
         retries: int = 3,
         retry_delay: float = 0.25,
+        request_interval: float = 0.0,
     ) -> None:
         self.endpoints = [endpoint.rstrip("/") for endpoint in endpoints if endpoint]
         if not self.endpoints:
             raise ValueError("at least one endpoint is required")
         if retries < 1:
             raise ValueError("retries must be at least 1")
+        if request_interval < 0:
+            raise ValueError("request_interval must be non-negative")
         self.model = model
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
+        self.request_interval = request_interval
         self._next_endpoint = 0
         self._endpoint_lock = threading.Lock()
+        self._request_slot_lock = threading.Lock()
+        self._next_request_time = 0.0
+
+    def _wait_for_request_slot(self) -> None:
+        if not self.request_interval:
+            return
+        with self._request_slot_lock:
+            now = time.monotonic()
+            request_time = max(now, self._next_request_time)
+            self._next_request_time = request_time + self.request_interval
+        delay = request_time - now
+        if delay > 0:
+            time.sleep(delay)
 
     def chat(
         self,
@@ -101,6 +137,7 @@ class DSClient:
                 method="POST",
             )
             try:
+                self._wait_for_request_slot()
                 with urlopen(request, timeout=self.timeout) as response:
                     response_body = json.loads(response.read().decode("utf-8"))
                 message = response_body["choices"][0]["message"]
@@ -131,8 +168,13 @@ class DSClient:
                     delay = self.retry_delay * (2 ** (attempt - 1))
                     time.sleep(delay * random.uniform(0.8, 1.2))
 
-        raise RuntimeError(
-            f"chat completion failed after {self.retries} attempts: {last_error}"
+        endpoint = retry_errors[-1]["endpoint"] if retry_errors else self.endpoints[0]
+        raise DSRequestError(
+            f"chat completion failed after {self.retries} attempts: {last_error}",
+            attempts=self.retries,
+            endpoint=endpoint,
+            latency_seconds=round(time.monotonic() - started, 3),
+            retry_errors=retry_errors,
         ) from last_error
 
 

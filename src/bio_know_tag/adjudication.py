@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from bio_know_tag.ds import append_evidence, parse_json_content
+from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
@@ -359,6 +359,16 @@ def run_adjudication(
                     )
                 ),
             )
+        except DSRequestError as exc:
+            record.update(
+                {
+                    "endpoint": exc.endpoint,
+                    "attempts": exc.attempts,
+                    "latency_seconds": exc.latency_seconds,
+                    "retry_errors": list(exc.retry_errors),
+                }
+            )
+            record["error"] = f"{type(exc).__name__}: {exc}"
         except Exception as exc:
             record["error"] = f"{type(exc).__name__}: {exc}"
         return index, record

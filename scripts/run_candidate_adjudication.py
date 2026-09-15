@@ -25,6 +25,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=1.0)
+    parser.add_argument(
+        "--request-interval",
+        type=float,
+        default=0.0,
+        help="minimum seconds between HTTP attempt starts across all workers",
+    )
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=1)
     return parser.parse_args()
@@ -41,6 +47,8 @@ def main() -> int:
         raise SystemExit("--workers must be positive")
     if args.retry_delay < 0:
         raise SystemExit("--retry-delay must be non-negative")
+    if args.request_interval < 0:
+        raise SystemExit("--request-interval must be non-negative")
     run_dir = args.run_dir or Path("runtime") / datetime.now().strftime(
         "%Y%m%d-%H%M%S-candidate-adjudication"
     )
@@ -50,6 +58,7 @@ def main() -> int:
         timeout=args.timeout,
         retries=args.retries,
         retry_delay=args.retry_delay,
+        request_interval=args.request_interval,
     )
     report = run_adjudication(
         args.units,

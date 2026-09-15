@@ -10,6 +10,7 @@ from bio_know_tag.adjudication import (
     run_adjudication,
     validate_adjudication_result,
 )
+from bio_know_tag.ds import DSRequestError
 
 
 def _label(label_id: str, name: str) -> dict:
@@ -517,3 +518,53 @@ def test_run_adjudication_filters_risky_training_rows(
     assert report["usable_for_training"] == 0
     assert report["filtered_from_training"] == 1
     assert report["training_filter_reasons"][expected_reason] == 1
+
+
+def test_run_adjudication_records_terminal_request_diagnostics(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
+    candidates_path.write_text(
+        json.dumps({"question_id": "q1", "candidates": [_candidate(1)]}) + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            raise DSRequestError(
+                "chat completion failed after 5 attempts: reset",
+                attempts=5,
+                endpoint="http://ds.test/v1/chat/completions",
+                latency_seconds=31.2,
+                retry_errors=[
+                    {
+                        "attempt": attempt,
+                        "endpoint": "http://ds.test/v1/chat/completions",
+                        "error_type": "ConnectionResetError",
+                        "error": "reset",
+                    }
+                    for attempt in range(1, 6)
+                ],
+            )
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+    )
+    evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
+
+    assert report["success"] == 0
+    assert evidence["attempts"] == 5
+    assert evidence["endpoint"] == "http://ds.test/v1/chat/completions"
+    assert evidence["latency_seconds"] == 31.2
+    assert len(evidence["retry_errors"]) == 5

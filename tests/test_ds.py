@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,6 +11,7 @@ from bio_know_tag.ds import (
     ALIGNMENT_DECISIONS,
     NAME_SUFFICIENCY_DECISIONS,
     DSClient,
+    DSRequestError,
     build_stage1_prompt,
     classify_alignment,
     load_completed_ids,
@@ -57,11 +59,12 @@ def test_completed_ids_only_includes_successful_rows(tmp_path: Path):
 
 
 def test_ds_client_retries_retryable_http_error():
-    state = {"requests": 0, "payload": None}
+    state = {"requests": 0, "payload": None, "request_times": []}
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802
             state["requests"] += 1
+            state["request_times"].append(time.monotonic())
             length = int(self.headers["Content-Length"])
             state["payload"] = json.loads(self.rfile.read(length))
             if state["requests"] == 1:
@@ -97,6 +100,7 @@ def test_ds_client_retries_retryable_http_error():
             timeout=2,
             retries=2,
             retry_delay=0,
+            request_interval=0.03,
         )
         response = client.chat([{"role": "user", "content": "test"}], max_tokens=64)
     finally:
@@ -107,6 +111,7 @@ def test_ds_client_retries_retryable_http_error():
     assert response.retry_errors[0]["error_type"] == "HTTPError"
     assert response.endpoint == endpoint
     assert state["requests"] == 2
+    assert state["request_times"][1] - state["request_times"][0] >= 0.025
     assert state["payload"]["temperature"] == 0
     assert state["payload"]["model"] == "DeepSeek-V4-Flash"
 
@@ -172,6 +177,72 @@ def test_ds_client_distributes_concurrent_requests_across_endpoints():
 
     assert counts == [2, 2]
     assert all(response.usage["total_tokens"] == 5 for response in responses)
+
+
+def test_ds_client_failure_preserves_all_retry_diagnostics(monkeypatch):
+    def fail(*args, **kwargs):
+        raise ConnectionResetError(104, "reset")
+
+    monkeypatch.setattr("bio_know_tag.ds.urlopen", fail)
+    endpoint = "http://example.test/v1/chat/completions"
+    client = DSClient([endpoint], "model", retries=3, retry_delay=0)
+
+    with pytest.raises(DSRequestError) as captured:
+        client.chat([{"role": "user", "content": "x"}])
+
+    error = captured.value
+    assert error.attempts == 3
+    assert error.endpoint == endpoint
+    assert len(error.retry_errors) == 3
+    assert {item["error_type"] for item in error.retry_errors} == {
+        "ConnectionResetError"
+    }
+    assert error.latency_seconds >= 0
+
+
+def test_ds_client_spaces_concurrent_http_attempts():
+    request_times = []
+    lock = threading.Lock()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers["Content-Length"])
+            self.rfile.read(length)
+            with lock:
+                request_times.append(time.monotonic())
+            body = json.dumps(
+                {"choices": [{"message": {"content": '{"ok":true}'}}]}
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+    try:
+        client = DSClient(
+            [endpoint], "model", retries=1, request_interval=0.03
+        )
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            list(
+                executor.map(
+                    lambda _: client.chat([{"role": "user", "content": "x"}]),
+                    range(3),
+                )
+            )
+    finally:
+        server.shutdown()
+        thread.join()
+
+    assert len(request_times) == 3
+    gaps = [later - earlier for earlier, later in zip(request_times, request_times[1:])]
+    assert all(gap >= 0.025 for gap in gaps)
 
 
 def test_validate_alignment_rejects_out_of_range_score():
