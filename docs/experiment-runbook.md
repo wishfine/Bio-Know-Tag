@@ -618,7 +618,7 @@ wc -l \
   "$JUDGE_SMOKE/tail_selected.jsonl"
 ```
 
-验收要求：`input=processed=success=10`、`error=pending=0`。精判v2要求每个证据都是题目、答案或解析中的可校验原文，并要求模型对每个Label执行“删除测试”，减少上位概念、底层常识和普通相关知识的多打。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
+验收要求：`input=processed=success=10`、`error=pending=0`。精判v2要求每个证据都是题目、答案或解析中的可校验原文，并要求模型对每个Label执行“删除测试”，减少上位概念、底层常识和普通相关知识的多打。若证据语义可用但不是题内逐字子串，程序保留标签，并输出 `evidence_verified=false`、`needs_review=true`；这类情况计入报告的 `unverified_evidence_items` 和 `questions_with_unverified_evidence`，不再把整题判为失败。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
 
 ### 15.3 决定生产使用Top20还是Top25
 

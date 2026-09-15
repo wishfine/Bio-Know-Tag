@@ -135,17 +135,18 @@ def validate_adjudication_result(
             raise ValueError("selected question_evidence must be non-empty")
         if not necessity:
             raise ValueError("selected necessity must be non-empty")
+        evidence_verified: bool | None = None
         if question_evidence_text is not None:
             normalized_source = re.sub(r"\s+", "", question_evidence_text)
             normalized_evidence = re.sub(r"\s+", "", evidence)
-            if normalized_evidence not in normalized_source:
-                raise ValueError("selected question_evidence is not quoted from the question")
+            evidence_verified = normalized_evidence in normalized_source
         if code not in seen:
             normalized.append(
                 {
                     "code": code,
                     "question_evidence": evidence,
                     "necessity": necessity,
+                    "question_evidence_verified": evidence_verified,
                 }
             )
             seen.add(code)
@@ -350,6 +351,8 @@ def run_adjudication(
     max_selected_rank = 0
     need_expand = 0
     none_count = 0
+    unverified_evidence_items = 0
+    questions_with_unverified_evidence = 0
     with (
         temporary.open("w", encoding="utf-8", newline="\n") as output,
         tail_temporary.open("w", encoding="utf-8", newline="\n") as tail_output,
@@ -367,6 +370,7 @@ def run_adjudication(
             }
             selected_labels = []
             used_tail = False
+            has_unverified_evidence = False
             for item in parsed["selected"]:
                 label_id = code_map[item["code"]]
                 label = labels_by_id[label_id]
@@ -377,6 +381,11 @@ def run_adjudication(
                     max_selected_rank = max(max_selected_rank, rank)
                 used_tail = used_tail or 21 <= rank <= 25
                 selected_from_tail += int(21 <= rank <= 25)
+                evidence_verified = item.get("question_evidence_verified", True)
+                has_unverified_evidence = (
+                    has_unverified_evidence or evidence_verified is False
+                )
+                unverified_evidence_items += int(evidence_verified is False)
                 selected_labels.append(
                     {
                         "label_id": label_id,
@@ -387,10 +396,12 @@ def run_adjudication(
                         "sparse_rank": candidate.get("sparse_rank"),
                         "dense_rank": candidate.get("dense_rank"),
                         "evidence": item["question_evidence"],
+                        "evidence_verified": evidence_verified,
                         "necessity": item["necessity"],
                     }
                 )
             questions_using_tail += int(used_tail)
+            questions_with_unverified_evidence += int(has_unverified_evidence)
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
             none_count += int(parsed["none_of_candidates"])
@@ -402,6 +413,7 @@ def run_adjudication(
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
                 "reason": parsed["reason"],
+                "needs_review": has_unverified_evidence,
                 "candidate_count": len(candidates),
                 "retrieval_version": candidate_rows[question_id].get(
                     "retrieval_version", ""
@@ -484,6 +496,8 @@ def run_adjudication(
         "questions_using_rank_21_25": questions_using_tail,
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
+        "unverified_evidence_items": unverified_evidence_items,
+        "questions_with_unverified_evidence": questions_with_unverified_evidence,
         "model": model,
         "prompt_version": prompt_version,
     }

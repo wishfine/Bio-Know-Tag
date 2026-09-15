@@ -78,9 +78,10 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         "need_expand_recall": False,
         "reason": "C01是完成设问所需的最小知识点。",
     }
-    assert validate_adjudication_result(
+    validated = validate_adjudication_result(
         valid, {"C01", "C02"}, question_evidence_text="题干 答案 解析"
-    ) == valid
+    )
+    assert validated["selected"][0]["question_evidence_verified"] is True
 
     with pytest.raises(ValueError, match="question_evidence"):
         validate_adjudication_result(
@@ -96,12 +97,21 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
             },
             {"C01", "C02"},
         )
-    with pytest.raises(ValueError, match="not quoted"):
-        validate_adjudication_result(
-            valid,
-            {"C01", "C02"},
-            question_evidence_text="题干 答案",
-        )
+    unverified = validate_adjudication_result(
+        {
+            **valid,
+            "selected": [
+                {
+                    "code": "C01",
+                    "question_evidence": "补写的上下文；题干",
+                    "necessity": "覆盖当前设问",
+                }
+            ],
+        },
+        {"C01", "C02"},
+        question_evidence_text="题干 答案",
+    )
+    assert unverified["selected"][0]["question_evidence_verified"] is False
     with pytest.raises(ValueError, match="none_of_candidates"):
         validate_adjudication_result(
             {**valid, "selected": [], "none_of_candidates": False},
@@ -183,6 +193,10 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["selected_from_rank_21_25"] == 1
     assert report["questions_using_rank_21_25"] == 1
     assert report["need_expand_recall"] == 0
+    assert report["unverified_evidence_items"] == 0
+    assert report["questions_with_unverified_evidence"] == 0
+    assert prediction["selected_labels"][0]["evidence_verified"] is True
+    assert prediction["needs_review"] is False
     tail = json.loads((output / "tail_selected.jsonl").read_text(encoding="utf-8"))
     assert tail["question"]["question_id"] == "q1"
     assert tail["prediction"]["selected_labels"][0]["candidate_rank"] == 23
