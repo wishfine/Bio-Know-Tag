@@ -976,3 +976,193 @@ printf 'V7_RUN=%s PID=%s\n' "$V7_RUN" "$(cat "$V7_RUN/pid")"
 ```
 
 完成标准：`input=processed=success=300`、`error=pending=0`、`prompt_version=candidate-adjudication-v7-balanced-precision`。优先对照`docs/pilot-v4-v6-300-question-review.md`中的7道“v6精度改差”、7道“v6覆盖下降”和2道“路由状态改差”：前者应消除跨维度错标，后两类不应因过度保守继续丢失可判断样本。
+
+## 22. 用有效旧 `knw_ids` 大规模验证候选召回
+
+本实验只把“旧 `knw_ids` 与当前458 Label的交集”当作弱监督目标。旧树中有、但老师释义表中没有的ID是废弃Label：只统计数量，不进入Recall分母、候选或DS Prompt。
+
+### 22.1 构建约5%的确定性大样本
+
+5%预计从1,857,591个打标单元中抽取约9.3万题；只将至少有1个有效旧Label的题写入后续召回输入。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
+LEGACY_SAMPLE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-legacy-recall-sample"
+mkdir -p "$LEGACY_SAMPLE_RUN"
+printf '%s\n' "$LEGACY_SAMPLE_RUN" > runtime/LATEST_LEGACY_RECALL_SAMPLE_RUN
+
+PYTHONPATH=src python scripts/build_legacy_recall_sample.py \
+  --units "$UNIT_RUN/label_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$LEGACY_SAMPLE_RUN" \
+  --sample-rate 0.05 \
+  --seed legacy-recall-v1
+
+python -m json.tool "$LEGACY_SAMPLE_RUN/report.json"
+wc -l "$LEGACY_SAMPLE_RUN/evaluation_units.jsonl"
+```
+
+### 22.2 按原配方生成 Top25
+
+```bash
+DENSE_PY='/local_data/zhangyonglin/conda_envs/bio-know-tag-dense/bin/python'
+DENSE_MODEL='/local_data/zhangyonglin/data/bio-know-tag/models/bge-small-zh-v1.5'
+
+LEGACY_SPARSE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-legacy-sparse-top30"
+LEGACY_DENSE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-legacy-dense-top30"
+LEGACY_HYBRID_RUN="runtime/$(date +%Y%m%d-%H%M%S)-legacy-hybrid-s18-d7-k25"
+mkdir -p "$LEGACY_SPARSE_RUN" "$LEGACY_DENSE_RUN" "$LEGACY_HYBRID_RUN"
+printf '%s\n' "$LEGACY_SPARSE_RUN" > runtime/LATEST_LEGACY_SPARSE_RUN
+printf '%s\n' "$LEGACY_DENSE_RUN" > runtime/LATEST_LEGACY_DENSE_RUN
+printf '%s\n' "$LEGACY_HYBRID_RUN" > runtime/LATEST_LEGACY_HYBRID_RUN
+
+PYTHONPATH=src python scripts/run_sparse_retrieval.py \
+  --units "$LEGACY_SAMPLE_RUN/evaluation_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$LEGACY_SPARSE_RUN" \
+  --top-k 30
+
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_dense_retrieval.py \
+  --units "$LEGACY_SAMPLE_RUN/evaluation_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$LEGACY_DENSE_RUN" \
+  --model "$DENSE_MODEL" \
+  --device cuda:0 \
+  --top-k 30 \
+  --batch-size 128 \
+  --local-files-only
+
+PYTHONPATH=src python scripts/fuse_retrieval_candidates.py \
+  --sparse-candidates "$LEGACY_SPARSE_RUN/candidates.jsonl" \
+  --dense-candidates "$LEGACY_DENSE_RUN/candidates.jsonl" \
+  --run-dir "$LEGACY_HYBRID_RUN" \
+  --top-k 25 \
+  --sparse-quota 18 \
+  --dense-quota 7
+```
+
+### 22.3 计算Recall@5/10/20/25
+
+```bash
+LEGACY_EVAL_RUN="runtime/$(date +%Y%m%d-%H%M%S)-legacy-recall-eval"
+mkdir -p "$LEGACY_EVAL_RUN"
+printf '%s\n' "$LEGACY_EVAL_RUN" > runtime/LATEST_LEGACY_RECALL_EVAL_RUN
+
+PYTHONPATH=src python scripts/evaluate_legacy_recall.py \
+  --units "$LEGACY_SAMPLE_RUN/evaluation_units.jsonl" \
+  --candidates "$LEGACY_HYBRID_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$LEGACY_EVAL_RUN"
+
+python -m json.tool "$LEGACY_EVAL_RUN/report.json"
+wc -l "$LEGACY_EVAL_RUN/misses.jsonl" "$LEGACY_EVAL_RUN/per_label.jsonl"
+```
+
+`report.json`同时给出any-hit、all-hit、micro recall和独立题/小题分层指标；`per_label.jsonl`用于找高频低召回Label，`misses.jsonl`用于人工抽查。这些是对历史弱标签的覆盖率，不是金标Recall。首先看`standalone`分层；组合题旧ID可能是父题并集，all-hit偏低不能直接判定召回失败。
+
+### 22.4 验证通过后增加旧Label候选通道
+
+这一步不直接继承旧Label，只将有效旧ID去重后追加到Top25，最终仍由DS拒绝或选择。每题最多补5个：
+
+```bash
+LEGACY_AUGMENTED_RUN="runtime/$(date +%Y%m%d-%H%M%S)-legacy-augmented-candidates"
+mkdir -p "$LEGACY_AUGMENTED_RUN"
+printf '%s\n' "$LEGACY_AUGMENTED_RUN" > runtime/LATEST_LEGACY_AUGMENTED_RUN
+
+PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
+  --units "$LEGACY_SAMPLE_RUN/evaluation_units.jsonl" \
+  --candidates "$LEGACY_HYBRID_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$LEGACY_AUGMENTED_RUN" \
+  --max-legacy-additions 5
+
+python -m json.tool "$LEGACY_AUGMENTED_RUN/report.json"
+```
+
+## 23. 用旧 `knw_ids` 抽题验证老师释义边界
+
+每个当前Label优先抽5道旧ID正例。第一轮只抽独立题，避免组合题的父题Label并集污染判断。DS只看题目、Label名和老师四个释义字段，不看旧ID，只输出`applicable: true/false`。
+
+### 23.1 构建正例样本
+
+```bash
+UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
+BOUNDARY_SAMPLE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-label-boundary-positive-sample"
+mkdir -p "$BOUNDARY_SAMPLE_RUN"
+printf '%s\n' "$BOUNDARY_SAMPLE_RUN" > runtime/LATEST_LABEL_BOUNDARY_SAMPLE_RUN
+
+PYTHONPATH=src python scripts/build_label_boundary_sample.py \
+  --units "$UNIT_RUN/label_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$BOUNDARY_SAMPLE_RUN" \
+  --positive-per-label 5 \
+  --negative-per-label 0 \
+  --unit-type standalone
+
+python -m json.tool "$BOUNDARY_SAMPLE_RUN/report.json"
+wc -l "$BOUNDARY_SAMPLE_RUN/boundary_samples.jsonl"
+```
+
+`labels_without_legacy_positive`表示在独立题中没有找到历史正例的当前Label，不代表该Label无效。后续可去掉`--unit-type standalone`再补抽，但组合题结果需要单独看待。
+
+### 23.2 20对 smoke
+
+```bash
+BOUNDARY_SMOKE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-label-boundary-judge-smoke"
+mkdir -p "$BOUNDARY_SMOKE_RUN"
+
+nohup env PYTHONPATH=src python scripts/run_label_boundary_judge.py \
+  --samples "$BOUNDARY_SAMPLE_RUN/boundary_samples.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$BOUNDARY_SMOKE_RUN" \
+  --endpoint 'http://172.22.0.35:9104/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --limit 20 \
+  --workers 4 \
+  --timeout 300 \
+  --retries 10 \
+  --retry-delay 2 \
+  --request-interval 2 \
+  --max-tokens 32 \
+  > "$BOUNDARY_SMOKE_RUN/nohup.log" 2>&1 &
+
+printf '%s\n' "$!" > "$BOUNDARY_SMOKE_RUN/pid"
+```
+
+### 23.3 全部正例Judge
+
+```bash
+BOUNDARY_JUDGE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-label-boundary-positive-judge"
+mkdir -p "$BOUNDARY_JUDGE_RUN"
+printf '%s\n' "$BOUNDARY_JUDGE_RUN" > runtime/LATEST_LABEL_BOUNDARY_JUDGE_RUN
+
+nohup env PYTHONPATH=src python scripts/run_label_boundary_judge.py \
+  --samples "$BOUNDARY_SAMPLE_RUN/boundary_samples.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$BOUNDARY_JUDGE_RUN" \
+  --endpoint 'http://172.22.0.35:9104/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 4 \
+  --timeout 300 \
+  --retries 10 \
+  --retry-delay 2 \
+  --request-interval 2 \
+  --max-tokens 32 \
+  > "$BOUNDARY_JUDGE_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$BOUNDARY_JUDGE_RUN/pid"
+printf 'BOUNDARY_JUDGE_RUN=%s PID=%s\n' "$BOUNDARY_JUDGE_RUN" "$PID"
+```
+
+同一运行目录重跑时会跳过已成功的题目-Label对，只补跑error/pending；样本、Label表、模型或参数变化时会被`run_manifest.json`拒绝混跑。验收：
+
+```bash
+python -m json.tool "$BOUNDARY_JUDGE_RUN/report.json"
+wc -l "$BOUNDARY_JUDGE_RUN/predictions.jsonl" "$BOUNDARY_JUDGE_RUN/per_label.jsonl"
+```
+
+`legacy_positive_true_rate`表示DS根据老师释义接受历史正例的比例。false项必须人工抽查：可能是释义边界过窄，也可能是旧ID错标，不能自动当成老师释义有问题。正例完成后，再用`--negative-per-label 3`抽同父级难负例，验证释义是否过宽。

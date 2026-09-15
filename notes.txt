@@ -33,3 +33,9 @@ Bio-Know-Tag Pilot实验记录
 - v4前44条平均输入10260 tokens、输出356 tokens；20并发吞吐约0.141题/秒。20条成功请求经历过一次API重试，1条因输出达到1024 tokens造成JSON截断。
 - v5移除rejected_close_codes、necessity、reason和模型输出的none_of_candidates，保留selected(code/evidence)、need_expand_recall、missing_knowledge和context_insufficient。
 - DSClient采用指数退避加随机抖动，evidence记录retry_errors，报告汇总requests_retried和retry_error_types，便于判断并发压力与服务错误类型。
+
+2026-09-15 legacy weak-supervision experiments
+- Retrieval validation: deterministically sample full labeling units, discard obsolete tree-only IDs, and report Recall@5/10/20/25 against only IDs present in the current 458-label catalog.
+- Candidate augmentation: after validation, append at most five missing valid historical IDs as candidates; never inherit them as final labels.
+- Boundary validation: sample up to five standalone historical positives per current Label and ask DS for a strict boolean using the Label name plus the four teacher-authored definition fields. Optional sibling hard negatives test overly broad boundaries.
+- Outputs are JSONL sidecars plus reports; legacy agreement is explicitly treated as weak supervision rather than gold accuracy.
