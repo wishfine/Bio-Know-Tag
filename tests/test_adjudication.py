@@ -67,6 +67,11 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert '"parent_context_missing": false' in prompt
     assert '"image_context_missing": false' in prompt
     assert '"context_insufficient": false' in prompt
+    assert "rejected_close_codes" not in prompt
+    assert '"necessity"' not in prompt
+    assert '"reason"' not in prompt
+    assert '"none_of_candidates"' not in prompt
+    assert '"missing_knowledge"' in prompt
 
 
 def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
@@ -92,30 +97,26 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         "selected": [
             {
                 "code": "C01",
-                "question_evidence": "解析",
-                "necessity": "覆盖当前设问",
+                "evidence": "解析",
             }
         ],
-        "rejected_close_codes": ["C02"],
-        "none_of_candidates": False,
         "need_expand_recall": False,
+        "missing_knowledge": "",
         "context_insufficient": False,
-        "reason": "C01是完成设问所需的最小知识点。",
     }
     validated = validate_adjudication_result(
         valid, {"C01", "C02"}, question_evidence_text="题干 答案 解析"
     )
     assert validated["selected"][0]["question_evidence_verified"] is True
 
-    with pytest.raises(ValueError, match="question_evidence"):
+    with pytest.raises(ValueError, match="evidence"):
         validate_adjudication_result(
             {
                 **valid,
                 "selected": [
                     {
                         "code": "C01",
-                        "question_evidence": "",
-                        "necessity": "覆盖当前设问",
+                        "evidence": "",
                     }
                 ],
             },
@@ -127,8 +128,7 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
             "selected": [
                 {
                     "code": "C01",
-                    "question_evidence": "补写的上下文；题干",
-                    "necessity": "覆盖当前设问",
+                    "evidence": "补写的上下文；题干",
                 }
             ],
         },
@@ -136,51 +136,53 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         question_evidence_text="题干 答案",
     )
     assert unverified["selected"][0]["question_evidence_verified"] is False
-    with pytest.raises(ValueError, match="none_of_candidates"):
+    with pytest.raises(ValueError, match="empty selected"):
         validate_adjudication_result(
-            {**valid, "selected": [], "none_of_candidates": False},
+            {**valid, "selected": []},
             {"C01", "C02"},
         )
 
 
 @pytest.mark.parametrize(
-    ("selected", "none", "expand", "context", "valid"),
+    ("selected", "expand", "missing", "context", "valid"),
     [
         (
-            [{"code": "C01", "question_evidence": "题干", "necessity": "设问"}],
+            [{"code": "C01", "evidence": "题干"}],
             False,
-            False,
+            "",
             False,
             True,
         ),
         (
-            [{"code": "C01", "question_evidence": "题干", "necessity": "设问"}],
-            False,
+            [{"code": "C01", "evidence": "题干"}],
             True,
+            "缺少的知识点",
             False,
             True,
         ),
-        ([], True, True, False, True),
-        ([], True, False, True, True),
-        ([], True, False, False, False),
-        ([], False, True, False, False),
+        ([], True, "缺少的知识点", False, True),
+        ([], False, "", True, True),
+        ([], False, "", False, False),
+        ([], True, "", False, False),
+        ([{"code": "C01", "evidence": "题干"}], False, "无", False, True),
     ],
 )
 def test_validate_adjudication_candidate_and_context_states(
-    selected, none, expand, context, valid
+    selected, expand, missing, context, valid
 ):
     value = {
         "selected": selected,
-        "rejected_close_codes": [],
-        "none_of_candidates": none,
         "need_expand_recall": expand,
+        "missing_knowledge": missing,
         "context_insufficient": context,
-        "reason": "依据",
     }
     if valid:
-        assert validate_adjudication_result(
+        result = validate_adjudication_result(
             value, {"C01"}, question_evidence_text="题干"
-        )["context_insufficient"] is context
+        )
+        assert result["context_insufficient"] is context
+        if not expand:
+            assert result["missing_knowledge"] == ""
     else:
         with pytest.raises(ValueError):
             validate_adjudication_result(
@@ -231,15 +233,12 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
                 "selected": [
                     {
                         "code": code_for_l23,
-                        "question_evidence": "解析",
-                        "necessity": "该知识直接覆盖设问",
+                        "evidence": "解析",
                     }
                 ],
-                "rejected_close_codes": ["C01"],
-                "none_of_candidates": False,
                 "need_expand_recall": False,
+                "missing_knowledge": "",
                 "context_insufficient": False,
-                "reason": "标签23最符合设问。",
             },
             ensure_ascii=False,
         )
@@ -253,6 +252,14 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
         }
         reasoning = None
         response_message_keys = ("role", "content", "reasoning")
+        retry_errors = (
+            {
+                "attempt": 1,
+                "endpoint": "fake",
+                "error_type": "ConnectionResetError",
+                "error": "reset",
+            },
+        )
 
     class Client:
         def chat(self, messages, *, max_tokens):
@@ -284,13 +291,18 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["token_usage"]["requests_with_usage"] == 1
     assert report["token_usage"]["mean_prompt_tokens"] == 100.0
     assert report["token_usage"]["mean_completion_tokens"] == 20.0
+    assert report["requests_retried"] == 1
+    assert report["retry_error_types"] == {"ConnectionResetError": 1}
     assert report["unverified_evidence_items"] == 0
     assert report["questions_with_unverified_evidence"] == 0
     assert prediction["selected_labels"][0]["evidence_verified"] is True
+    assert "necessity" not in prediction["selected_labels"][0]
+    assert prediction["missing_knowledge"] == ""
     assert prediction["needs_review"] is False
     evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
     assert evidence["usage"]["total_tokens"] == 120
     assert evidence["reasoning"] is None
+    assert evidence["retry_errors"][0]["error_type"] == "ConnectionResetError"
     tail = json.loads((output / "tail_selected.jsonl").read_text(encoding="utf-8"))
     assert tail["question"]["question_id"] == "q1"
     assert tail["prediction"]["selected_labels"][0]["candidate_rank"] == 23
@@ -328,15 +340,12 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
                 "selected": [
                     {
                         "code": "C01",
-                        "question_evidence": "题干",
-                        "necessity": "覆盖当前设问",
+                        "evidence": "题干",
                     }
                 ],
-                "rejected_close_codes": [],
-                "none_of_candidates": False,
                 "need_expand_recall": False,
+                "missing_knowledge": "",
                 "context_insufficient": False,
-                "reason": "最小充分集合。",
             },
             ensure_ascii=False,
         )

@@ -701,3 +701,37 @@ wc -l "$AUDIT_DS_RUN/evidence.jsonl" \
 ```
 
 若服务中途失败，使用完全相同的运行目录和参数重跑；程序跳过同Prompt版本的成功题，只请求未完成题。完成标准为 `processed=success=300`、`error=pending=0`、evidence行数不少于300，且 `prompt_version=candidate-adjudication-v4`。审核时提交 `audit_units.jsonl`、`audit_candidates.jsonl`、`predictions.jsonl`、`evidence.jsonl` 和 `report.json`。
+
+## 17. 紧凑精判v5与API重试审计
+
+v4的300题审核运行保留为基线，不在运行中切换Prompt。v5用于后续实验，删除 `rejected_close_codes`、逐Label的 `necessity`、全局 `reason`，并由程序根据 `selected` 是否为空推导 `none_of_candidates`。模型只输出：
+
+```json
+{
+  "selected": [{"code": "C01", "evidence": "不超过60字的题内原文"}],
+  "need_expand_recall": false,
+  "missing_knowledge": "",
+  "context_insufficient": false
+}
+```
+
+`need_expand_recall=true` 时 `missing_knowledge` 必须简述候选缺少的知识；否则必须为空。API层面对HTTP错误、连接重置和超时执行带随机抖动的指数退避，CLI用 `--retry-delay` 设置首次退避秒数。成功响应的 `retry_errors` 会写入evidence，报告汇总 `requests_retried` 与 `retry_error_types`。
+
+v5必须使用新运行目录，推荐参数：
+
+```bash
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V5_RUN" \
+  --endpoint "$DS1" \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --max-tokens 1024 \
+  > "$V5_RUN/nohup.log" 2>&1 &
+```
+
+预期 `prompt_version=candidate-adjudication-v5-compact`。输出字段减少后仍保留1024上限作为异常保护；正常响应应显著低于该上限。

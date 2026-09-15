@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import re
 import threading
 import time
@@ -42,6 +43,7 @@ class DSResponse:
     usage: dict[str, Any] | None = None
     reasoning: Any = None
     response_message_keys: tuple[str, ...] = ()
+    retry_errors: tuple[dict[str, Any], ...] = ()
 
 
 class DSClient:
@@ -84,6 +86,7 @@ class DSClient:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         started = time.monotonic()
         last_error: Exception | None = None
+        retry_errors: list[dict[str, Any]] = []
         with self._endpoint_lock:
             starting_index = self._next_endpoint
             self._next_endpoint = (self._next_endpoint + 1) % len(self.endpoints)
@@ -112,11 +115,21 @@ class DSClient:
                     usage=response_body.get("usage"),
                     reasoning=message.get("reasoning", message.get("reasoning_content")),
                     response_message_keys=tuple(message),
+                    retry_errors=tuple(retry_errors),
                 )
             except (HTTPError, URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc
+                retry_errors.append(
+                    {
+                        "attempt": attempt,
+                        "endpoint": endpoint,
+                        "error_type": type(exc).__name__,
+                        "error": str(exc),
+                    }
+                )
                 if attempt < self.retries and self.retry_delay:
-                    time.sleep(self.retry_delay * attempt)
+                    delay = self.retry_delay * (2 ** (attempt - 1))
+                    time.sleep(delay * random.uniform(0.8, 1.2))
 
         raise RuntimeError(
             f"chat completion failed after {self.retries} attempts: {last_error}"

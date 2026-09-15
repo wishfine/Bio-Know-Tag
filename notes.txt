@@ -28,3 +28,8 @@ Bio-Know-Tag Pilot实验记录
 - 从2,500题抽取300题：200题固定seed近似均匀抽样用于指标，100题覆盖风险与召回分歧用于压力审核。
 - DSClient修正并发端点轮询，确保9102/9103共同工作；evidence开始记录usage、reasoning、message keys和prompt字符数，报告汇总平均输入/输出token。
 - Prompt v4删除了未发送字段的旧knw_ids提示，按题目ID确定性打乱候选展示位置，细化错误选项和重叠Label规则，并以context_insufficient区分上下文缺失和候选召回缺失。300题必须使用新的v4运行目录。
+
+2026-09-15 紧凑精判v5
+- v4前44条平均输入10260 tokens、输出356 tokens；20并发吞吐约0.141题/秒。20条成功请求经历过一次API重试，1条因输出达到1024 tokens造成JSON截断。
+- v5移除rejected_close_codes、necessity、reason和模型输出的none_of_candidates，保留selected(code/evidence)、need_expand_recall、missing_knowledge和context_insufficient。
+- DSClient采用指数退避加随机抖动，evidence记录retry_errors，报告汇总requests_retried和retry_error_types，便于判断并发压力与服务错误类型。

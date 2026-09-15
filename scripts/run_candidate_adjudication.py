@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ask DS to select the minimal sufficient Label set from hybrid candidates."""
+"""Ask DS to select directly assessed Labels from hybrid candidates."""
 
 from __future__ import annotations
 
@@ -24,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--limit", type=int)
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
+    parser.add_argument("--retry-delay", type=float, default=1.0)
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=1)
     return parser.parse_args()
@@ -38,6 +39,8 @@ def main() -> int:
         raise SystemExit("--limit must be positive")
     if args.workers < 1:
         raise SystemExit("--workers must be positive")
+    if args.retry_delay < 0:
+        raise SystemExit("--retry-delay must be non-negative")
     run_dir = args.run_dir or Path("runtime") / datetime.now().strftime(
         "%Y%m%d-%H%M%S-candidate-adjudication"
     )
@@ -46,6 +49,7 @@ def main() -> int:
         args.model,
         timeout=args.timeout,
         retries=args.retries,
+        retry_delay=args.retry_delay,
     )
     report = run_adjudication(
         args.units,

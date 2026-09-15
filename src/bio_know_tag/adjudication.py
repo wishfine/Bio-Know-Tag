@@ -17,7 +17,7 @@ from bio_know_tag.ds import append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v4"
+PROMPT_VERSION = "candidate-adjudication-v5-compact"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -96,9 +96,9 @@ def build_adjudication_prompt(
 4. 优先选择与设问粒度最接近的具体Label。允许知识范围重叠：若两个Label分别覆盖不同设问，或同一设问确实同时考查两个知识维度，可以同时选择；仅被具体Label包含且没有独立考查依据的上位Label不选。
 5. 选中的Label释义必须直接覆盖实际设问。不得仅因名称宽泛而用“综合”“应用”等Label兜底；若其老师释义确实直接覆盖设问，仍可正常选择。
 6. 综合Label只有在题目确实要求多个子模块联动时才选。
-7. 候选完整时：selected可非空，none_of_candidates=false，need_expand_recall=false。候选仅覆盖部分知识时：selected可非空，none_of_candidates=false，need_expand_recall=true。候选全部不合适时：selected=[]，none_of_candidates=true，need_expand_recall=true。
-8. parent_context_missing或image_context_missing表示题目上下文缺失，不等于候选召回缺失。若仅因缺图或缺父题材料而无法可靠判断，设置context_insufficient=true；若此时无法选择任何Label，使用selected=[]、none_of_candidates=true、need_expand_recall=false。否则context_insufficient=false。
-9. 每个选中项的question_evidence应逐字摘自本题的parent_stem、stem、options、answer_text或analysis，不能把Label释义、常识或推断伪装成题目证据；necessity说明该Label直接覆盖哪个设问。
+7. 候选完整时：selected列出命中项，need_expand_recall=false，missing_knowledge=""。候选只覆盖部分知识时：selected可非空，need_expand_recall=true，并用missing_knowledge简述缺项。候选全部不合适时：selected=[]，need_expand_recall=true，并说明缺项。
+8. parent_context_missing或image_context_missing表示题目上下文缺失，不等于候选召回缺失。若仅因缺图或缺父题材料而无法可靠判断，设置context_insufficient=true；若此时无法选择任何Label，使用selected=[]、need_expand_recall=false、missing_knowledge=""。否则context_insufficient=false。
+9. 每个选中项的evidence应摘录题目中能证明命中的最短原文，尽量不超过60个汉字；不能把Label释义、常识或推断写成证据。
 10. 只能返回C01等短代码，不能抄写长label_id。
 
 题目：
@@ -109,12 +109,10 @@ def build_adjudication_prompt(
 
 只输出一个JSON对象：
 {{
-  "selected": [{{"code": "C01", "question_evidence": "题目中的原文短句", "necessity": "该Label直接覆盖的具体设问"}}],
-  "rejected_close_codes": ["容易混淆但不应命中的候选代码"],
-  "none_of_candidates": false,
+  "selected": [{{"code": "C01", "evidence": "不超过60字的题内原文"}}],
   "need_expand_recall": false,
-  "context_insufficient": false,
-  "reason": "简洁说明各Label与实际设问的直接对应关系"
+  "missing_knowledge": "need_expand_recall为true时简述缺少的知识，否则为空字符串",
+  "context_insufficient": false
 }}
 不要输出Markdown或JSON之外的内容。"""
     return prompt, code_map
@@ -128,11 +126,9 @@ def validate_adjudication_result(
 ) -> dict[str, Any]:
     required = (
         "selected",
-        "rejected_close_codes",
-        "none_of_candidates",
         "need_expand_recall",
+        "missing_knowledge",
         "context_insufficient",
-        "reason",
     )
     for field in required:
         if field not in value:
@@ -146,14 +142,11 @@ def validate_adjudication_result(
         if not isinstance(item, dict):
             raise ValueError("selected items must be objects")
         code = str(item.get("code") or "")
-        evidence = str(item.get("question_evidence") or "").strip()
-        necessity = str(item.get("necessity") or "").strip()
+        evidence = str(item.get("evidence") or "").strip()
         if code not in known_codes:
             raise ValueError(f"unknown selected code: {code}")
         if not evidence:
-            raise ValueError("selected question_evidence must be non-empty")
-        if not necessity:
-            raise ValueError("selected necessity must be non-empty")
+            raise ValueError("selected evidence must be non-empty")
         evidence_verified: bool | None = None
         if question_evidence_text is not None:
             normalized_source = re.sub(r"\s+", "", question_evidence_text)
@@ -164,29 +157,25 @@ def validate_adjudication_result(
                 {
                     "code": code,
                     "question_evidence": evidence,
-                    "necessity": necessity,
                     "question_evidence_verified": evidence_verified,
                 }
             )
             seen.add(code)
     value["selected"] = normalized
-    rejected = value["rejected_close_codes"]
-    if not isinstance(rejected, list) or any(
-        not isinstance(code, str) or code not in known_codes for code in rejected
-    ):
-        raise ValueError("rejected_close_codes contains an unknown code")
-    value["rejected_close_codes"] = [
-        code for code in dict.fromkeys(rejected) if code not in seen
-    ]
     for field in (
-        "none_of_candidates",
         "need_expand_recall",
         "context_insufficient",
     ):
         if not isinstance(value[field], bool):
             raise ValueError(f"{field} must be boolean")
-    if bool(normalized) == value["none_of_candidates"]:
-        raise ValueError("none_of_candidates is inconsistent with selected")
+    missing_knowledge = value["missing_knowledge"]
+    if not isinstance(missing_knowledge, str):
+        raise ValueError("missing_knowledge must be a string")
+    value["missing_knowledge"] = missing_knowledge.strip()
+    if value["need_expand_recall"] and not value["missing_knowledge"]:
+        raise ValueError("missing_knowledge is required when recall expansion is needed")
+    if not value["need_expand_recall"]:
+        value["missing_knowledge"] = ""
     if (
         not normalized
         and not value["need_expand_recall"]
@@ -195,8 +184,7 @@ def validate_adjudication_result(
         raise ValueError(
             "empty selected requires need_expand_recall or context_insufficient"
         )
-    if not isinstance(value["reason"], str) or not value["reason"].strip():
-        raise ValueError("reason must be a non-empty string")
+    value["none_of_candidates"] = not bool(normalized)
     return value
 
 
@@ -296,6 +284,7 @@ def run_adjudication(
             "usage": None,
             "reasoning": None,
             "response_message_keys": [],
+            "retry_errors": [],
             "error": None,
         }
         try:
@@ -320,6 +309,7 @@ def run_adjudication(
                     "response_message_keys": list(
                         getattr(response, "response_message_keys", ())
                     ),
+                    "retry_errors": list(getattr(response, "retry_errors", ())),
                 }
             )
             record["parsed_response"] = validate_adjudication_result(
@@ -438,7 +428,6 @@ def run_adjudication(
                         "dense_rank": candidate.get("dense_rank"),
                         "evidence": item["question_evidence"],
                         "evidence_verified": evidence_verified,
-                        "necessity": item["necessity"],
                     }
                 )
             selected_labels.sort(
@@ -462,8 +451,8 @@ def run_adjudication(
                 "selected_labels": selected_labels,
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
+                "missing_knowledge": parsed["missing_knowledge"],
                 "context_insufficient": parsed["context_insufficient"],
-                "reason": parsed["reason"],
                 "needs_review": needs_review,
                 "candidate_count": len(candidates),
                 "retrieval_version": candidate_rows[question_id].get(
@@ -540,6 +529,16 @@ def run_adjudication(
     reasoning_requests = sum(
         bool(record.get("reasoning")) for record in completed.values()
     )
+    retry_error_types: Counter[str] = Counter()
+    requests_retried = 0
+    for record in completed.values():
+        retry_errors = record.get("retry_errors") or []
+        requests_retried += int(bool(retry_errors))
+        retry_error_types.update(
+            str(error.get("error_type") or "unknown")
+            for error in retry_errors
+            if isinstance(error, dict)
+        )
     report = {
         "input": len(units),
         "processed": success,
@@ -549,6 +548,8 @@ def run_adjudication(
         "evidence_rows": evidence_rows,
         "requests_succeeded": requests_succeeded,
         "requests_failed": requests_failed,
+        "requests_retried": requests_retried,
+        "retry_error_types": dict(sorted(retry_error_types.items())),
         "workers": workers,
         "run_started_at": run_started_at,
         "run_wall_seconds": run_wall_seconds,

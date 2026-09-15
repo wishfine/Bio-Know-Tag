@@ -91,13 +91,20 @@ def test_ds_client_retries_retryable_http_error():
     thread.start()
     endpoint = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
     try:
-        client = DSClient([endpoint], "DeepSeek-V4-Flash", timeout=2, retries=2)
+        client = DSClient(
+            [endpoint],
+            "DeepSeek-V4-Flash",
+            timeout=2,
+            retries=2,
+            retry_delay=0,
+        )
         response = client.chat([{"role": "user", "content": "test"}], max_tokens=64)
     finally:
         server.shutdown()
         thread.join()
 
     assert response.attempts == 2
+    assert response.retry_errors[0]["error_type"] == "HTTPError"
     assert response.endpoint == endpoint
     assert state["requests"] == 2
     assert state["payload"]["temperature"] == 0
