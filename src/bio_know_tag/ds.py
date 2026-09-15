@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,9 @@ class DSResponse:
     endpoint: str
     attempts: int
     latency_seconds: float
+    usage: dict[str, Any] | None = None
+    reasoning: Any = None
+    response_message_keys: tuple[str, ...] = ()
 
 
 class DSClient:
@@ -62,6 +66,7 @@ class DSClient:
         self.retries = retries
         self.retry_delay = retry_delay
         self._next_endpoint = 0
+        self._endpoint_lock = threading.Lock()
 
     def chat(
         self,
@@ -74,11 +79,14 @@ class DSClient:
             "messages": messages,
             "temperature": 0,
             "max_tokens": max_tokens,
+            "stream": False,
         }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         started = time.monotonic()
         last_error: Exception | None = None
-        starting_index = self._next_endpoint
+        with self._endpoint_lock:
+            starting_index = self._next_endpoint
+            self._next_endpoint = (self._next_endpoint + 1) % len(self.endpoints)
 
         for attempt in range(1, self.retries + 1):
             endpoint_index = (starting_index + attempt - 1) % len(self.endpoints)
@@ -92,15 +100,18 @@ class DSClient:
             try:
                 with urlopen(request, timeout=self.timeout) as response:
                     response_body = json.loads(response.read().decode("utf-8"))
-                content = response_body["choices"][0]["message"]["content"]
+                message = response_body["choices"][0]["message"]
+                content = message["content"]
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("empty chat completion content")
-                self._next_endpoint = (endpoint_index + 1) % len(self.endpoints)
                 return DSResponse(
                     content=content,
                     endpoint=endpoint,
                     attempts=attempt,
                     latency_seconds=round(time.monotonic() - started, 3),
+                    usage=response_body.get("usage"),
+                    reasoning=message.get("reasoning", message.get("reasoning_content")),
+                    response_message_keys=tuple(message),
                 )
             except (HTTPError, URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc

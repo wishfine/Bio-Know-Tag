@@ -1,5 +1,6 @@
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -101,6 +102,69 @@ def test_ds_client_retries_retryable_http_error():
     assert state["requests"] == 2
     assert state["payload"]["temperature"] == 0
     assert state["payload"]["model"] == "DeepSeek-V4-Flash"
+
+
+def test_ds_client_distributes_concurrent_requests_across_endpoints():
+    counts = [0, 0]
+    locks = [threading.Lock(), threading.Lock()]
+    servers = []
+    threads = []
+
+    def handler_for(index):
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self):  # noqa: N802
+                length = int(self.headers["Content-Length"])
+                self.rfile.read(length)
+                with locks[index]:
+                    counts[index] += 1
+                body = json.dumps(
+                    {
+                        "choices": [{"message": {"content": '{"ok":true}'}}],
+                        "usage": {
+                            "prompt_tokens": 3,
+                            "completion_tokens": 2,
+                            "total_tokens": 5,
+                        },
+                    }
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, format, *args):  # noqa: A002
+                return
+
+        return Handler
+
+    try:
+        for index in range(2):
+            server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for(index))
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            servers.append(server)
+            threads.append(thread)
+        endpoints = [
+            f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+            for server in servers
+        ]
+        client = DSClient(endpoints, "model", timeout=2, retries=1)
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            responses = list(
+                executor.map(
+                    lambda _: client.chat([{"role": "user", "content": "x"}]),
+                    range(4),
+                )
+            )
+    finally:
+        for server in servers:
+            server.shutdown()
+        for thread in threads:
+            thread.join()
+
+    assert counts == [2, 2]
+    assert all(response.usage["total_tokens"] == 5 for response in responses)
 
 
 def test_validate_alignment_rejects_out_of_range_score():

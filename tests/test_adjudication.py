@@ -62,6 +62,8 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert "知识点@模块@标签一" in prompt
     assert "旧knw_ids" in prompt
     assert "candidate_rank" not in prompt
+    assert "允许知识范围重叠" in prompt
+    assert "删除测试" not in prompt
 
 
 def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
@@ -166,6 +168,13 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
         endpoint = "fake"
         attempts = 1
         latency_seconds = 0.1
+        usage = {
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+        }
+        reasoning = None
+        response_message_keys = ("role", "content", "reasoning")
 
     class Client:
         def chat(self, messages, *, max_tokens):
@@ -193,10 +202,16 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["selected_from_rank_21_25"] == 1
     assert report["questions_using_rank_21_25"] == 1
     assert report["need_expand_recall"] == 0
+    assert report["token_usage"]["requests_with_usage"] == 1
+    assert report["token_usage"]["mean_prompt_tokens"] == 100.0
+    assert report["token_usage"]["mean_completion_tokens"] == 20.0
     assert report["unverified_evidence_items"] == 0
     assert report["questions_with_unverified_evidence"] == 0
     assert prediction["selected_labels"][0]["evidence_verified"] is True
     assert prediction["needs_review"] is False
+    evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
+    assert evidence["usage"]["total_tokens"] == 120
+    assert evidence["reasoning"] is None
     tail = json.loads((output / "tail_selected.jsonl").read_text(encoding="utf-8"))
     assert tail["question"]["question_id"] == "q1"
     assert tail["prediction"]["selected_labels"][0]["candidate_rank"] == 23

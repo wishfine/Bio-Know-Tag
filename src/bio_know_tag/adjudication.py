@@ -71,17 +71,17 @@ def build_adjudication_prompt(
         "answer_text": str(unit.get("answer_text") or "")[:2000],
         "analysis": str(unit.get("analysis") or "")[:6000],
     }
-    prompt = f"""你是严谨的高中生物知识点判标器。请从候选中选择完成当前设问所必需的最小充分知识点集合。
+    prompt = f"""你是严谨的高中生物知识点判标器。请从候选中选择当前题目直接考查的知识点集合。
 
 判标规则：
 1. 依据老师给出的定义、核心概念和易混淆边界；不要参考旧knw_ids。
 2. 只有正确解答当前设问需要调用的知识点才打；材料背景、实验工具、错误选项和干扰项不打。
-3. 逐个设问、填空或正确选项判断知识需求；一个Label可以覆盖时，不再追加其上位概念、背景知识或底层常识。
-4. 对每个准备选中的Label执行“删除测试”：删掉它以后，学生是否仍能仅凭其他已选Label完整回答对应设问？如果能，就不要选它。
-5. 不能因为答案中的某个名词属于一个大类就给大类打标。例如题目只问膜的基本骨架时，不能仅因答案是“磷脂”而追加脂质分类；普通的引入天敌或生物农药也不等于利用生态系统信息传递。
+3. 逐个设问、填空或正确选项判断知识需求。允许知识范围重叠：只要两个不同Label都被题目直接考查，就可以同时选择，不要为了追求形式上的最小集合而漏标。
+4. 不选仅作为上位概念、材料背景、底层常识或弱相关联想的Label。不能因为答案中的某个名词属于一个大类就给大类打标，例如题目只问膜的基本骨架时，不能仅因答案是“磷脂”而追加脂质分类；普通的引入天敌或生物农药也不等于利用生态系统信息传递。
+5. 选中的Label释义必须直接覆盖实际设问。若候选中没有直接覆盖项，应设置need_expand_recall=true，不能用“综合”“应用”等宽泛Label凑答案。
 6. 综合Label只有在题目确实要求多个子模块联动时才选。
 7. 可以选择多个候选，也可以一个都不选。若正确知识点可能未进入候选，设置need_expand_recall=true。
-8. 每个选中项的question_evidence必须逐字摘自本题的parent_stem、stem、options、answer_text或analysis，不能把Label释义、常识或推断伪装成题目证据；necessity说明该Label具体覆盖哪个设问。
+8. 每个选中项的question_evidence应逐字摘自本题的parent_stem、stem、options、answer_text或analysis，不能把Label释义、常识或推断伪装成题目证据；necessity说明该Label直接覆盖哪个设问。
 9. 只能返回C01等短代码，不能抄写长label_id。
 
 题目：
@@ -92,11 +92,11 @@ def build_adjudication_prompt(
 
 只输出一个JSON对象：
 {{
-  "selected": [{{"code": "C01", "question_evidence": "题目中的原文短句", "necessity": "该Label具体覆盖的设问及不可删除原因"}}],
+  "selected": [{{"code": "C01", "question_evidence": "题目中的原文短句", "necessity": "该Label直接覆盖的具体设问"}}],
   "rejected_close_codes": ["容易混淆但不应命中的候选代码"],
   "none_of_candidates": false,
   "need_expand_recall": false,
-  "reason": "简洁说明最小充分集合的选择依据"
+  "reason": "简洁说明各Label与实际设问的直接对应关系"
 }}
 不要输出Markdown或JSON之外的内容。"""
     return prompt, code_map
@@ -222,7 +222,7 @@ def run_adjudication(
     output_dir = Path(run_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "evidence.jsonl"
-    prompt_version = "candidate-adjudication-v2"
+    prompt_version = "candidate-adjudication-v3"
     completed, evidence_rows = _latest_success(
         evidence_path, prompt_version=prompt_version
     )
@@ -253,6 +253,7 @@ def run_adjudication(
             "prompt_version": prompt_version,
             "question_id": question_id,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+            "prompt_chars": len(prompt),
             "candidate_code_map": code_map,
             "model": model,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -261,6 +262,9 @@ def run_adjudication(
             "endpoint": None,
             "attempts": 0,
             "latency_seconds": None,
+            "usage": None,
+            "reasoning": None,
+            "response_message_keys": [],
             "error": None,
         }
         try:
@@ -280,6 +284,11 @@ def run_adjudication(
                     "endpoint": response.endpoint,
                     "attempts": response.attempts,
                     "latency_seconds": response.latency_seconds,
+                    "usage": getattr(response, "usage", None),
+                    "reasoning": getattr(response, "reasoning", None),
+                    "response_message_keys": list(
+                        getattr(response, "response_message_keys", ())
+                    ),
                 }
             )
             record["parsed_response"] = validate_adjudication_result(
@@ -461,6 +470,34 @@ def run_adjudication(
 
     run_wall_seconds = round(time.monotonic() - run_started, 3)
     requests_this_run = requests_succeeded + requests_failed
+    usages = [
+        record["usage"]
+        for record in completed.values()
+        if isinstance(record.get("usage"), dict)
+    ]
+    prompt_tokens = [
+        int(usage["prompt_tokens"])
+        for usage in usages
+        if isinstance(usage.get("prompt_tokens"), (int, float))
+    ]
+    completion_tokens = [
+        int(usage["completion_tokens"])
+        for usage in usages
+        if isinstance(usage.get("completion_tokens"), (int, float))
+    ]
+    total_tokens = [
+        int(usage["total_tokens"])
+        for usage in usages
+        if isinstance(usage.get("total_tokens"), (int, float))
+    ]
+    prompt_chars = [
+        int(record["prompt_chars"])
+        for record in completed.values()
+        if isinstance(record.get("prompt_chars"), int)
+    ]
+    reasoning_requests = sum(
+        bool(record.get("reasoning")) for record in completed.values()
+    )
     report = {
         "input": len(units),
         "processed": success,
@@ -484,6 +521,27 @@ def run_adjudication(
             "p50": percentile(latencies, 0.5),
             "p95": percentile(latencies, 0.95),
             "max": round(latencies[-1], 3) if latencies else None,
+        },
+        "token_usage": {
+            "requests_with_usage": len(usages),
+            "total_prompt_tokens": sum(prompt_tokens),
+            "total_completion_tokens": sum(completion_tokens),
+            "total_tokens": sum(total_tokens),
+            "mean_prompt_tokens": round(sum(prompt_tokens) / len(prompt_tokens), 3)
+            if prompt_tokens
+            else None,
+            "mean_completion_tokens": round(
+                sum(completion_tokens) / len(completion_tokens), 3
+            )
+            if completion_tokens
+            else None,
+            "mean_total_tokens": round(sum(total_tokens) / len(total_tokens), 3)
+            if total_tokens
+            else None,
+            "mean_prompt_chars": round(sum(prompt_chars) / len(prompt_chars), 3)
+            if prompt_chars
+            else None,
+            "requests_with_reasoning": reasoning_requests,
         },
         "selected_count_distribution": dict(
             sorted(selected_count_distribution.items(), key=lambda item: int(item[0]))

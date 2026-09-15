@@ -618,7 +618,7 @@ wc -l \
   "$JUDGE_SMOKE/tail_selected.jsonl"
 ```
 
-验收要求：`input=processed=success=10`、`error=pending=0`。精判v2要求每个证据都是题目、答案或解析中的可校验原文，并要求模型对每个Label执行“删除测试”，减少上位概念、底层常识和普通相关知识的多打。若证据语义可用但不是题内逐字子串，程序保留标签，并输出 `evidence_verified=false`、`needs_review=true`；这类情况计入报告的 `unverified_evidence_items` 和 `questions_with_unverified_evidence`，不再把整题判为失败。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
+验收要求：`input=processed=success=10`、`error=pending=0`。精判v3输出所有被设问直接考查的Label，允许语义重叠，但排除上位概念、背景和弱相关联想。若证据语义可用但不是题内逐字子串，程序保留标签，并输出 `evidence_verified=false`、`needs_review=true`；这类情况计入报告的 `unverified_evidence_items` 和 `questions_with_unverified_evidence`，不再把整题判为失败。`predictions.jsonl` 是结构化结果，`evidence.jsonl` 保存原始响应、usage和reasoning信息，`tail_selected.jsonl` 专门收集选中候选排名21～25的题目供人工复核。相同运行目录可安全续跑同一Prompt版本；不同Prompt版本必须使用新目录。
 
 ### 15.3 决定生产使用Top20还是Top25
 
@@ -633,3 +633,71 @@ wc -l \
 最终应报告人工金标上的 `Recall@20`、`Recall@25`、两者增量、DS多打率、漏打率和每题平均标签数，再冻结生产参数。
 
 精判器支持 `--workers` 并发请求；所有HTTP请求可并行，但 evidence 仍由主线程逐行安全落盘。`report.json` 会记录并发数、运行墙钟时间、请求吞吐及延迟的均值、P50、P95和最大值。先用20题、`--workers 4` 验证服务承载能力，再逐步增加到8；若出现超时或HTTP错误，应降低并发并在同一运行目录续跑失败项。
+
+## 16. 300题DS精判与GPT人工审核集
+
+审核集由两部分组成：200题使用固定seed做近似均匀抽样，用于估计整体指标；100题覆盖缺父题、图片风险、空答案/解析、题型难度、知识模块及BM25/Dense Top1分歧，用于发现失败模式。两部分必须分开报告，不能把压力集当作总体无偏样本。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+PILOT_RUN="$(cat runtime/LATEST_PILOT_RUN)"
+HYBRID_RUN="$(cat runtime/LATEST_HYBRID_RECALL_RUN)"
+AUDIT_SAMPLE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-adjudication-audit-300"
+
+mkdir -p "$AUDIT_SAMPLE_RUN"
+printf '%s\n' "$AUDIT_SAMPLE_RUN" > runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN
+
+PYTHONPATH=src python scripts/build_adjudication_audit_sample.py \
+  --units "$PILOT_RUN/pilot_units.jsonl" \
+  --candidates "$HYBRID_RUN/candidates.jsonl" \
+  --run-dir "$AUDIT_SAMPLE_RUN" \
+  --sample-size 300 \
+  --representative-size 200
+
+python -m json.tool "$AUDIT_SAMPLE_RUN/report.json"
+wc -l "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  "$AUDIT_SAMPLE_RUN/audit_manifest.jsonl"
+```
+
+使用两个端点共同精判。客户端会在线程安全的轮询中把并发请求均匀分配给9102和9103；后台运行并保留PID：
+
+```bash
+export DS1='http://'172.22.0.35':9102/v1/chat/completions'
+export DS2='http://'172.22.0.35':9103/v1/chat/completions'
+export MODEL='DeepSeek-V4-Flash'
+
+AUDIT_DS_RUN="runtime/$(date +%Y%m%d-%H%M%S)-adjudication-audit-300-ds"
+mkdir -p "$AUDIT_DS_RUN"
+printf '%s\n' "$AUDIT_DS_RUN" > runtime/LATEST_ADJUDICATION_AUDIT_DS_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$AUDIT_DS_RUN" \
+  --endpoint "$DS1" \
+  --endpoint "$DS2" \
+  --workers 4 \
+  --timeout 300 \
+  --retries 3 \
+  --max-tokens 1024 \
+  > "$AUDIT_DS_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$AUDIT_DS_RUN/pid"
+printf 'AUDIT_DS_RUN=%s PID=%s\n' "$AUDIT_DS_RUN" "$PID"
+```
+
+只通过日志和sidecar查看进度：
+
+```bash
+AUDIT_DS_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_DS_RUN)"
+tail -n 30 "$AUDIT_DS_RUN/nohup.log"
+python -m json.tool "$AUDIT_DS_RUN/report.json"
+wc -l "$AUDIT_DS_RUN/evidence.jsonl" \
+  "$AUDIT_DS_RUN/predictions.jsonl" \
+  "$AUDIT_DS_RUN/tail_selected.jsonl"
+```
+
+若服务中途失败，使用完全相同的运行目录和参数重跑；程序跳过同Prompt版本的成功题，只请求未完成题。完成标准为 `processed=success=300`、`error=pending=0`、evidence行数不少于300。审核时提交 `audit_units.jsonl`、`audit_candidates.jsonl`、`predictions.jsonl`、`evidence.jsonl` 和 `report.json`。

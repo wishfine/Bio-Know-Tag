@@ -201,7 +201,7 @@ def choose_strategy(
         reason = "名称基本可理解；只附老师的易混淆边界，兼顾吞吐和边界稳定性。"
     else:
         mode = "name_only"
-        automation = "名称召回后由LLM按最小充分知识集裁决"
+        automation = "名称召回后由LLM按设问直接考查范围裁决"
         reason = "Stage 2 判断名称本身足够，先用名称高效召回，再由设问语义做最终裁决。"
 
     manual = _manual_review_required(category, stage2, issue)
@@ -531,7 +531,7 @@ def build_second_review_records(records: Iterable[dict[str, Any]]) -> list[dict[
         final_strategy = {
             "mode": final_mode,
             "automation": {
-                "name_only": "名称召回后由LLM按最小充分知识集裁决",
+                "name_only": "名称召回后由LLM按设问直接考查范围裁决",
                 "name_plus_boundary": "名称召回并附一条边界后由LLM裁决",
                 "compact_definition": "提供精简老师释义后由LLM裁决",
                 "strict_definition": "提供老师边界后由LLM最终裁决",
