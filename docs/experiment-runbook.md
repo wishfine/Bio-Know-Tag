@@ -843,3 +843,80 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
 ```
 
 预期 `prompt_version=candidate-adjudication-v5-compact`。输出字段减少后仍保留1024上限作为异常保护；正常响应应显著低于该上限。
+
+## 19. 高精度优先精判v6（原Top25候选）
+
+v6按训练数据目标调整为“允许漏标、允许空结果、严格避免错标”。它不要求每道小题覆盖完整知识点，也不因遗漏次要知识点强制扩大召回。每个小题独立精判；父题Label之后取已保留小题Label的并集，并另行补充父题公共材料直接考查的额外Label。
+
+候选Label只发送`label_name`、`label_path`、`definition`、`core_concepts`和`distinctions`，不发送`common_assessments`、召回排名或分数。模型只输出：
+
+```json
+{
+  "selected": [{"code": "C01", "evidence": "不超过40字的题内原文"}],
+  "need_expand_recall": false,
+  "context_insufficient": false
+}
+```
+
+程序允许`selected=[]`，并生成：
+
+```text
+usable_for_training = selected非空
+                      且need_expand_recall=false
+                      且context_insufficient=false
+```
+
+在原300题、原Top25候选上重新运行，不使用Top30或reranker候选：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V6_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v6-precision"
+mkdir -p "$V6_RUN"
+printf '%s\n' "$V6_RUN" > runtime/LATEST_ADJUDICATION_V6_RUN
+
+python - "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" <<'PY'
+import json
+import sys
+from collections import Counter
+
+rows = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8") if line.strip()]
+versions = Counter(str(row.get("retrieval_version") or "") for row in rows)
+counts = Counter(len(row.get("candidates") or []) for row in rows)
+summary = {"rows": len(rows), "retrieval_versions": dict(versions), "candidate_counts": dict(counts)}
+print(summary)
+if len(rows) != 300 or versions != {"hybrid-v1-s18-d7-k25": 300} or counts != {25: 300}:
+    raise SystemExit("原Top25候选预检失败，请勿启动v6")
+PY
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V6_RUN" \
+  --endpoint 'http://172.22.0.35:9104/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --max-tokens 512 \
+  > "$V6_RUN/nohup.log" 2>&1 &
+
+printf '%s\n' "$!" > "$V6_RUN/pid"
+printf 'V6_RUN=%s PID=%s\n' "$V6_RUN" "$(cat "$V6_RUN/pid")"
+```
+
+监控与验收：
+
+```bash
+V6_RUN="$(cat runtime/LATEST_ADJUDICATION_V6_RUN)"
+tail -n 30 "$V6_RUN/nohup.log"
+python -m json.tool "$V6_RUN/report.json"
+python -m json.tool "$V6_RUN/run_manifest.json"
+wc -l "$V6_RUN/predictions.jsonl" "$V6_RUN/evidence.jsonl"
+```
+
+完成标准：`input=processed=success=300`、`error=pending=0`、`prompt_version=candidate-adjudication-v6-precision-first`、`candidate_retrieval_versions=["hybrid-v1-s18-d7-k25"]`、`candidate_count_distribution={"25":300}`。`run_manifest.json`绑定题目、候选、Label文件哈希与模型参数；同目录恢复运行时若任何关键输入变化，程序会拒绝混跑。优先人工复核`usable_for_training=true`的非空结果是否存在错标；空结果、扩召和上下文不足结果直接过滤，不以漏标率作为本轮失败标准。

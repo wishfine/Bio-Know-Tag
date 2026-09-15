@@ -59,10 +59,14 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert set(code_map.values()) == {"L1", "L2"}
     assert "C01" in prompt
     assert "标签一定义" in prompt
+    assert "标签一核心" in prompt
+    assert "标签一边界" in prompt
+    assert "标签一考查" not in prompt
     assert "知识点@模块@标签一" in prompt
     assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
-    assert "允许知识范围重叠" in prompt
+    assert "错选一个Label比漏选更严重" in prompt
+    assert "允许少选，也允许selected为空" in prompt
     assert "删除测试" not in prompt
     assert '"parent_context_missing": false' in prompt
     assert '"image_context_missing": false' in prompt
@@ -71,7 +75,7 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert '"necessity"' not in prompt
     assert '"reason"' not in prompt
     assert '"none_of_candidates"' not in prompt
-    assert '"missing_knowledge"' in prompt
+    assert '"missing_knowledge"' not in prompt
 
 
 def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
@@ -101,7 +105,6 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
             }
         ],
         "need_expand_recall": False,
-        "missing_knowledge": "",
         "context_insufficient": False,
     }
     validated = validate_adjudication_result(
@@ -136,44 +139,41 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         question_evidence_text="题干 答案",
     )
     assert unverified["selected"][0]["question_evidence_verified"] is False
-    with pytest.raises(ValueError, match="empty selected"):
-        validate_adjudication_result(
-            {**valid, "selected": []},
-            {"C01", "C02"},
-        )
+    empty = validate_adjudication_result(
+        {**valid, "selected": []},
+        {"C01", "C02"},
+    )
+    assert empty["none_of_candidates"] is True
 
 
 @pytest.mark.parametrize(
-    ("selected", "expand", "missing", "context", "valid"),
+    ("selected", "expand", "context", "valid"),
     [
         (
             [{"code": "C01", "evidence": "题干"}],
             False,
-            "",
             False,
             True,
         ),
         (
             [{"code": "C01", "evidence": "题干"}],
             True,
-            "缺少的知识点",
             False,
             True,
         ),
-        ([], True, "缺少的知识点", False, True),
-        ([], False, "", True, True),
-        ([], False, "", False, False),
-        ([], True, "", False, False),
-        ([{"code": "C01", "evidence": "题干"}], False, "无", False, True),
+        ([], True, False, True),
+        ([], False, True, True),
+        ([], False, False, True),
+        ([{"code": "C01", "evidence": "题干"}], False, False, True),
+        ("not-a-list", False, False, False),
     ],
 )
 def test_validate_adjudication_candidate_and_context_states(
-    selected, expand, missing, context, valid
+    selected, expand, context, valid
 ):
     value = {
         "selected": selected,
         "need_expand_recall": expand,
-        "missing_knowledge": missing,
         "context_insufficient": context,
     }
     if valid:
@@ -181,8 +181,6 @@ def test_validate_adjudication_candidate_and_context_states(
             value, {"C01"}, question_evidence_text="题干"
         )
         assert result["context_insufficient"] is context
-        if not expand:
-            assert result["missing_knowledge"] == ""
     else:
         with pytest.raises(ValueError):
             validate_adjudication_result(
@@ -237,7 +235,6 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
                     }
                 ],
                 "need_expand_recall": False,
-                "missing_knowledge": "",
                 "context_insufficient": False,
             },
             ensure_ascii=False,
@@ -288,6 +285,8 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["questions_using_rank_21_25"] == 1
     assert report["need_expand_recall"] == 0
     assert report["context_insufficient"] == 0
+    assert report["usable_for_training"] == 1
+    assert report["filtered_from_training"] == 0
     assert report["token_usage"]["requests_with_usage"] == 1
     assert report["token_usage"]["mean_prompt_tokens"] == 100.0
     assert report["token_usage"]["mean_completion_tokens"] == 20.0
@@ -297,7 +296,8 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["questions_with_unverified_evidence"] == 1
     assert prediction["selected_labels"][0]["evidence_verified"] is False
     assert "necessity" not in prediction["selected_labels"][0]
-    assert prediction["missing_knowledge"] == ""
+    assert prediction["usable_for_training"] is True
+    assert "missing_knowledge" not in prediction
     # Evidence substring matching is diagnostic only. A semantically useful
     # paraphrase must not create a manual-review task by itself.
     assert prediction["needs_review"] is False
@@ -346,7 +346,6 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
                     }
                 ],
                 "need_expand_recall": False,
-                "missing_knowledge": "",
                 "context_insufficient": False,
             },
             ensure_ascii=False,
@@ -387,3 +386,134 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
     assert report["requests_per_second_this_run"] > 0
     assert report["request_latency_seconds"]["count"] == 2
     assert client.max_active == 2
+
+
+def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
+    labels_path.write_text(
+        "".join(
+            json.dumps(_label(f"L{index}", f"标签{index}"), ensure_ascii=False) + "\n"
+            for index in (1, 2)
+        ),
+        encoding="utf-8",
+    )
+    candidates_path.write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "retrieval_version": "hybrid-v1-s18-d7-k25",
+                "candidates": [_candidate(1)],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = json.dumps(
+            {
+                "selected": [{"code": "C01", "evidence": "题干"}],
+                "need_expand_recall": False,
+                "context_insufficient": False,
+            },
+            ensure_ascii=False,
+        )
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+    )
+    candidates_path.write_text(
+        json.dumps(
+            {
+                "question_id": "q1",
+                "retrieval_version": "changed",
+                "candidates": [_candidate(2)],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="run manifest mismatch"):
+        run_adjudication(
+            units_path,
+            candidates_path,
+            labels_path,
+            output,
+            Client(),
+            model="fake-model",
+        )
+
+
+@pytest.mark.parametrize(
+    ("selected", "expand", "context", "expected_reason"),
+    [
+        ([], False, False, "empty_selected"),
+        ([{"code": "C01", "evidence": "题干"}], True, False, "need_expand_recall"),
+        ([{"code": "C01", "evidence": "题干"}], False, True, "context_insufficient"),
+    ],
+)
+def test_run_adjudication_filters_risky_training_rows(
+    tmp_path: Path, selected, expand, context, expected_reason
+):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
+    candidates_path.write_text(
+        json.dumps({"question_id": "q1", "candidates": [_candidate(1)]}) + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = json.dumps(
+            {
+                "selected": selected,
+                "need_expand_recall": expand,
+                "context_insufficient": context,
+            },
+            ensure_ascii=False,
+        )
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+    )
+    prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
+
+    assert prediction["usable_for_training"] is False
+    assert report["usable_for_training"] == 0
+    assert report["filtered_from_training"] == 1
+    assert report["training_filter_reasons"][expected_reason] == 1

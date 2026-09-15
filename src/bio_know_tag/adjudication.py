@@ -17,7 +17,7 @@ from bio_know_tag.ds import append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v5-compact"
+PROMPT_VERSION = "candidate-adjudication-v6-precision-first"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -40,6 +40,23 @@ def _write_json_atomic(path: Path, value: Any) -> None:
         encoding="utf-8",
     )
     temporary.replace(path)
+
+
+def _file_sha256(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _ensure_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
+    if path.exists():
+        existing = json.loads(path.read_text(encoding="utf-8"))
+        if existing != manifest:
+            raise ValueError("run manifest mismatch; use a new run directory")
+        return
+    _write_json_atomic(path, manifest)
 
 
 def build_adjudication_prompt(
@@ -68,7 +85,6 @@ def build_adjudication_prompt(
                 "label_path": format_label_path(label.get("label_path")),
                 "definition": label.get("definition", ""),
                 "core_concepts": label.get("core_concepts", ""),
-                "common_assessments": label.get("common_assessments", ""),
                 "distinctions": label.get("distinctions", ""),
             }
         )
@@ -87,19 +103,20 @@ def build_adjudication_prompt(
             (unit.get("flags") or {}).get("image_context_missing")
         ),
     }
-    prompt = f"""你是严谨的高中生物知识点判标器。请从候选中选择当前题目直接考查的知识点集合。
+    prompt = f"""你是严谨的高中生物知识点判标器。任务目标是高精度：错选一个Label比漏选更严重。
 
 判标规则：
-1. 以老师给出的definition、core_concepts和distinctions为主要判定依据。common_assessments仅作辅助，不能因题型或关键词与示例相似就命中。
-2. 逐个设问、填空和需要判断的选项识别知识需求。只有正确作答确实需要调用的Label才选；材料背景、实验工具和弱相关联想不选。
-3. 不能仅因某知识点词语出现在错误选项中就选择；若判断该选项正误确实需要调用该知识点，且构成题目的实际考查内容，则可以选择。
-4. 优先选择与设问粒度最接近的具体Label。允许知识范围重叠：若两个Label分别覆盖不同设问，或同一设问确实同时考查两个知识维度，可以同时选择；仅被具体Label包含且没有独立考查依据的上位Label不选。
-5. 选中的Label释义必须直接覆盖实际设问。不得仅因名称宽泛而用“综合”“应用”等Label兜底；若其老师释义确实直接覆盖设问，仍可正常选择。
-6. 综合Label只有在题目确实要求多个子模块联动时才选。
-7. 候选完整时：selected列出命中项，need_expand_recall=false，missing_knowledge=""。候选只覆盖部分知识时：selected可非空，need_expand_recall=true，并用missing_knowledge简述缺项。候选全部不合适时：selected=[]，need_expand_recall=true，并说明缺项。
-8. parent_context_missing或image_context_missing表示题目上下文缺失，不等于候选召回缺失。若仅因缺图或缺父题材料而无法可靠判断，设置context_insufficient=true；若此时无法选择任何Label，使用selected=[]、need_expand_recall=false、missing_knowledge=""。否则context_insufficient=false。
-9. 每个选中项的evidence应摘录题目中能证明命中的最短原文，尽量不超过60个汉字；不能把Label释义、常识或推断写成证据。
-10. 只能返回C01等短代码，不能抄写长label_id。
+1. 以老师给出的definition、core_concepts和distinctions为唯一Label边界，不自行扩张Label含义。
+2. 只判断当前小题。parent_stem仅提供理解当前小题所需的公共语境，父题其他内容和兄弟小题知识点不选；大题Label之后由各小题Label并集，再通过单独的父题步骤补充公共材料额外考查的Label。
+3. 只有正确作答当前设问确实需要调用、且你能确认无误的Label才选。材料背景、实验工具、只在叙述中出现但不影响作答的概念、弱相关联想均不选。
+4. 允许少选，也允许selected为空。不要为了覆盖完整或避免空结果而选择不确定、宽泛、上位或仅相关的Label。
+5. 判断选择题错误选项时，只有辨别该选项正误确实需要调用的知识点才可选，不能看到术语就打标。
+6. 优先选择与设问粒度最接近的具体Label。两个Label语义重叠时，只有各自都有独立、明确的考查依据才同时选择；否则只选更直接者。
+7. “综合”“应用”“热点”“方法”等Label必须严格满足老师释义，不得作为兜底或仅因题目背景命中。
+8. 若当前题目的明确考点在候选中完全找不到，设置need_expand_recall=true；允许漏掉次要或不确定知识点，不要求为了完整覆盖而扩召。
+9. 仅在缺图或缺父题材料导致无法可靠判断当前小题时设置context_insufficient=true；若答案或解析已足够确定Label，则保持false。
+10. 每个选中项的evidence摘录题目中能直接证明命中的最短原文，尽量不超过40个汉字；不能用Label释义、常识或推断代替题内证据。
+11. 只能返回C01等短代码，不能抄写长label_id。
 
 题目：
 {json.dumps(question, ensure_ascii=False)}
@@ -109,9 +126,8 @@ def build_adjudication_prompt(
 
 只输出一个JSON对象：
 {{
-  "selected": [{{"code": "C01", "evidence": "不超过60字的题内原文"}}],
+  "selected": [{{"code": "C01", "evidence": "不超过40字的题内原文"}}],
   "need_expand_recall": false,
-  "missing_knowledge": "need_expand_recall为true时简述缺少的知识，否则为空字符串",
   "context_insufficient": false
 }}
 不要输出Markdown或JSON之外的内容。"""
@@ -127,7 +143,6 @@ def validate_adjudication_result(
     required = (
         "selected",
         "need_expand_recall",
-        "missing_knowledge",
         "context_insufficient",
     )
     for field in required:
@@ -161,31 +176,18 @@ def validate_adjudication_result(
                 }
             )
             seen.add(code)
-    value["selected"] = normalized
     for field in (
         "need_expand_recall",
         "context_insufficient",
     ):
         if not isinstance(value[field], bool):
             raise ValueError(f"{field} must be boolean")
-    missing_knowledge = value["missing_knowledge"]
-    if not isinstance(missing_knowledge, str):
-        raise ValueError("missing_knowledge must be a string")
-    value["missing_knowledge"] = missing_knowledge.strip()
-    if value["need_expand_recall"] and not value["missing_knowledge"]:
-        raise ValueError("missing_knowledge is required when recall expansion is needed")
-    if not value["need_expand_recall"]:
-        value["missing_knowledge"] = ""
-    if (
-        not normalized
-        and not value["need_expand_recall"]
-        and not value["context_insufficient"]
-    ):
-        raise ValueError(
-            "empty selected requires need_expand_recall or context_insufficient"
-        )
-    value["none_of_candidates"] = not bool(normalized)
-    return value
+    return {
+        "selected": normalized,
+        "need_expand_recall": value["need_expand_recall"],
+        "context_insufficient": value["context_insufficient"],
+        "none_of_candidates": not bool(normalized),
+    }
 
 
 def _latest_success(
@@ -242,6 +244,37 @@ def run_adjudication(
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "evidence.jsonl"
     prompt_version = PROMPT_VERSION
+    candidate_versions = sorted(
+        {str(row.get("retrieval_version") or "") for row in candidate_rows.values()}
+    )
+    candidate_count_distribution = dict(
+        sorted(
+            Counter(
+                str(len(row.get("candidates") or []))
+                for row in candidate_rows.values()
+            ).items(),
+            key=lambda item: int(item[0]),
+        )
+    )
+    manifest = {
+        "prompt_version": prompt_version,
+        "model": model,
+        "limit": limit,
+        "max_tokens": max_tokens,
+        "input_paths": {
+            "units": str(Path(units_path)),
+            "candidates": str(Path(candidates_path)),
+            "labels": str(Path(labels_path)),
+        },
+        "input_sha256": {
+            "units": _file_sha256(units_path),
+            "candidates": _file_sha256(candidates_path),
+            "labels": _file_sha256(labels_path),
+        },
+        "candidate_retrieval_versions": candidate_versions,
+        "candidate_count_distribution": candidate_count_distribution,
+    }
+    _ensure_run_manifest(output_dir / "run_manifest.json", manifest)
     completed, evidence_rows = _latest_success(
         evidence_path, prompt_version=prompt_version
     )
@@ -382,6 +415,8 @@ def run_adjudication(
     need_expand = 0
     none_count = 0
     context_insufficient_count = 0
+    usable_for_training_count = 0
+    training_filter_reasons: Counter[str] = Counter()
     unverified_evidence_items = 0
     questions_with_unverified_evidence = 0
     with (
@@ -443,6 +478,18 @@ def run_adjudication(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
             )
+            usable_for_training = bool(
+                selected_labels
+                and not parsed["need_expand_recall"]
+                and not parsed["context_insufficient"]
+            )
+            usable_for_training_count += int(usable_for_training)
+            if not selected_labels:
+                training_filter_reasons["empty_selected"] += 1
+            if parsed["need_expand_recall"]:
+                training_filter_reasons["need_expand_recall"] += 1
+            if parsed["context_insufficient"]:
+                training_filter_reasons["context_insufficient"] += 1
             prediction = {
                 "question_id": question_id,
                 "parent_id": unit.get("parent_id", question_id),
@@ -450,9 +497,9 @@ def run_adjudication(
                 "selected_labels": selected_labels,
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
-                "missing_knowledge": parsed["missing_knowledge"],
                 "context_insufficient": parsed["context_insufficient"],
                 "needs_review": needs_review,
+                "usable_for_training": usable_for_training,
                 "candidate_count": len(candidates),
                 "retrieval_version": candidate_rows[question_id].get(
                     "retrieval_version", ""
@@ -597,8 +644,14 @@ def run_adjudication(
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "context_insufficient": context_insufficient_count,
+        "usable_for_training": usable_for_training_count,
+        "filtered_from_training": success - usable_for_training_count,
+        "training_filter_reasons": dict(sorted(training_filter_reasons.items())),
         "unverified_evidence_items": unverified_evidence_items,
         "questions_with_unverified_evidence": questions_with_unverified_evidence,
+        "input_sha256": manifest["input_sha256"],
+        "candidate_retrieval_versions": candidate_versions,
+        "candidate_count_distribution": candidate_count_distribution,
         "model": model,
         "prompt_version": prompt_version,
     }
