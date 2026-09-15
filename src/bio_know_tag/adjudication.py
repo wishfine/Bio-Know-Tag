@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -17,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v6-precision-first"
+PROMPT_VERSION = "candidate-adjudication-v7-balanced-precision"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -103,20 +102,21 @@ def build_adjudication_prompt(
             (unit.get("flags") or {}).get("image_context_missing")
         ),
     }
-    prompt = f"""你是严谨的高中生物知识点判标器。任务目标是高精度：错选一个Label比漏选更严重。
+    prompt = f"""你是严谨的高中生物知识点判标器。目标是选出当前题目实际考查的所有合理Label；合理多标可以保留，但不能用相近而边界不同的Label替代。
 
 判标规则：
 1. 以老师给出的definition、core_concepts和distinctions为唯一Label边界，不自行扩张Label含义。
 2. 只判断当前小题。parent_stem仅提供理解当前小题所需的公共语境，父题其他内容和兄弟小题知识点不选；大题Label之后由各小题Label并集，再通过单独的父题步骤补充公共材料额外考查的Label。
-3. 只有正确作答当前设问确实需要调用、且你能确认无误的Label才选。材料背景、实验工具、只在叙述中出现但不影响作答的概念、弱相关联想均不选。
-4. 允许少选，也允许selected为空。不要为了覆盖完整或避免空结果而选择不确定、宽泛、上位或仅相关的Label。
-5. 判断选择题错误选项时，只有辨别该选项正误确实需要调用的知识点才可选，不能看到术语就打标。
-6. 优先选择与设问粒度最接近的具体Label。两个Label语义重叠时，只有各自都有独立、明确的考查依据才同时选择；否则只选更直接者。
-7. “综合”“应用”“热点”“方法”等Label必须严格满足老师释义，不得作为兜底或仅因题目背景命中。
-8. 若当前题目的明确考点在候选中完全找不到，设置need_expand_recall=true；允许漏掉次要或不确定知识点，不要求为了完整覆盖而扩召。
-9. 仅在缺图或缺父题材料导致无法可靠判断当前小题时设置context_insufficient=true；若答案或解析已足够确定Label，则保持false。
-10. 每个选中项的evidence摘录题目中能直接证明命中的最短原文，尽量不超过40个汉字；不能用Label释义、常识或推断代替题内证据。
-11. 只能返回C01等短代码，不能抄写长label_id。
+3. 当前设问、每个选项的正误判断、答案或解析明确调用某Label时，该Label都可选。材料背景、工具名称、弱相关联想不选。
+4. 允许同时选择多个合理Label，不要强行压缩为“最小集合”。上下位或语义重叠的Label只要各自释义都直接覆盖题目考点，可以同时选择。
+5. 选择前先校验“考查维度”。原理、实验、应用、结论和发展史属于不同维度；同一对象但考查维度不同，不能互相替代。边界匹配优先于粒度具体。
+6. distinctions中的区分是硬边界。题目若落在distinctions明确区分的另一侧，不得选择该Label。
+7. 典型边界示例：考“渗透失水原理”不等于考“观察质壁分离实验”；考“细胞是生命活动基本单位”不等于考“细胞学说发展史”；考“水跨膜运输”不等于考“水的存在形式与转化”。
+8. “综合”“应用”“热点”“方法”等Label只有在题目实际考查该维度且符合老师释义时才选，不得用作兜底。
+9. 允许selected为空。若题目有明确高中生物考点，但候选只有相近而不准确的Label，不要硬选，设置need_expand_recall=true。若已选中至少一个准确Label，仅漏掉次要或不确定知识点时保持false。非生物题或无有效设问时也保持false。
+10. 仅当缺图或缺父题材料使你连一个可靠Label都无法确定时，才设置context_insufficient=true。只要stem、options、answer_text或analysis已足够确定至少一个Label，就保持false。
+11. 在内部先列出当前题目的明确考点，再逐个核对候选的definition、考查维度和distinctions；不要输出这个思考过程。
+12. 只能返回C01等短代码，不能抄写长label_id。
 
 题目：
 {json.dumps(question, ensure_ascii=False)}
@@ -126,7 +126,7 @@ def build_adjudication_prompt(
 
 只输出一个JSON对象：
 {{
-  "selected": [{{"code": "C01", "evidence": "不超过40字的题内原文"}}],
+  "selected": ["C01", "C05"],
   "need_expand_recall": false,
   "context_insufficient": false
 }}
@@ -137,8 +137,6 @@ def build_adjudication_prompt(
 def validate_adjudication_result(
     value: dict[str, Any],
     known_codes: set[str],
-    *,
-    question_evidence_text: str | None = None,
 ) -> dict[str, Any]:
     required = (
         "selected",
@@ -152,29 +150,15 @@ def validate_adjudication_result(
     if not isinstance(selected, list):
         raise ValueError("selected must be a list")
     seen: set[str] = set()
-    normalized = []
+    normalized: list[str] = []
     for item in selected:
-        if not isinstance(item, dict):
-            raise ValueError("selected items must be objects")
-        code = str(item.get("code") or "")
-        evidence = str(item.get("evidence") or "").strip()
+        if not isinstance(item, str):
+            raise ValueError("selected items must be short codes")
+        code = item.strip()
         if code not in known_codes:
             raise ValueError(f"unknown selected code: {code}")
-        if not evidence:
-            raise ValueError("selected evidence must be non-empty")
-        evidence_verified: bool | None = None
-        if question_evidence_text is not None:
-            normalized_source = re.sub(r"\s+", "", question_evidence_text)
-            normalized_evidence = re.sub(r"\s+", "", evidence)
-            evidence_verified = normalized_evidence in normalized_source
         if code not in seen:
-            normalized.append(
-                {
-                    "code": code,
-                    "question_evidence": evidence,
-                    "question_evidence_verified": evidence_verified,
-                }
-            )
+            normalized.append(code)
             seen.add(code)
     for field in (
         "need_expand_recall",
@@ -348,16 +332,6 @@ def run_adjudication(
             record["parsed_response"] = validate_adjudication_result(
                 parse_json_content(response.content),
                 set(code_map),
-                question_evidence_text="\n".join(
-                    str(unit.get(field) or "")
-                    for field in (
-                        "parent_stem",
-                        "stem",
-                        "options",
-                        "answer_text",
-                        "analysis",
-                    )
-                ),
             )
         except DSRequestError as exc:
             record.update(
@@ -427,8 +401,6 @@ def run_adjudication(
     context_insufficient_count = 0
     usable_for_training_count = 0
     training_filter_reasons: Counter[str] = Counter()
-    unverified_evidence_items = 0
-    questions_with_unverified_evidence = 0
     with (
         temporary.open("w", encoding="utf-8", newline="\n") as output,
         tail_temporary.open("w", encoding="utf-8", newline="\n") as tail_output,
@@ -446,9 +418,8 @@ def run_adjudication(
             }
             selected_labels = []
             used_tail = False
-            has_unverified_evidence = False
-            for item in parsed["selected"]:
-                label_id = code_map[item["code"]]
+            for code in parsed["selected"]:
+                label_id = code_map[code]
                 label = labels_by_id[label_id]
                 candidate = candidates_by_id[label_id]
                 rank = int(candidate.get("candidate_rank") or candidate.get("rank") or 0)
@@ -457,11 +428,6 @@ def run_adjudication(
                     max_selected_rank = max(max_selected_rank, rank)
                 used_tail = used_tail or 21 <= rank <= 25
                 selected_from_tail += int(21 <= rank <= 25)
-                evidence_verified = item.get("question_evidence_verified", True)
-                has_unverified_evidence = (
-                    has_unverified_evidence or evidence_verified is False
-                )
-                unverified_evidence_items += int(evidence_verified is False)
                 selected_labels.append(
                     {
                         "label_id": label_id,
@@ -471,15 +437,12 @@ def run_adjudication(
                         "sources": candidate.get("sources", []),
                         "sparse_rank": candidate.get("sparse_rank"),
                         "dense_rank": candidate.get("dense_rank"),
-                        "evidence": item["question_evidence"],
-                        "evidence_verified": evidence_verified,
                     }
                 )
             selected_labels.sort(
                 key=lambda item: (item["candidate_rank"], item["label_id"])
             )
             questions_using_tail += int(used_tail)
-            questions_with_unverified_evidence += int(has_unverified_evidence)
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
             none_count += int(parsed["none_of_candidates"])
@@ -657,8 +620,6 @@ def run_adjudication(
         "usable_for_training": usable_for_training_count,
         "filtered_from_training": success - usable_for_training_count,
         "training_filter_reasons": dict(sorted(training_filter_reasons.items())),
-        "unverified_evidence_items": unverified_evidence_items,
-        "questions_with_unverified_evidence": questions_with_unverified_evidence,
         "input_sha256": manifest["input_sha256"],
         "candidate_retrieval_versions": candidate_versions,
         "candidate_count_distribution": candidate_count_distribution,

@@ -923,3 +923,56 @@ wc -l "$V6_RUN/predictions.jsonl" "$V6_RUN/evidence.jsonl"
 `--request-interval 2`表示所有worker共享一个请求启动节流器，任意两个HTTP尝试的启动时间至少间隔2秒，避免线程池启动和同步重试形成瞬时连接惊群；它不限制服务端同时处理的在途请求数。失败记录会保存真实的`attempts`、最后`endpoint`、总延迟及每次`retry_errors`。
 
 完成标准：`input=processed=success=300`、`error=pending=0`、`prompt_version=candidate-adjudication-v6-precision-first`、`candidate_retrieval_versions=["hybrid-v1-s18-d7-k25"]`、`candidate_count_distribution={"25":300}`。`run_manifest.json`绑定题目、候选、Label文件哈希与模型参数；同目录恢复运行时若任何关键输入变化，程序会拒绝混跑。优先人工复核`usable_for_training=true`的非空结果是否存在错标；空结果、扩召和上下文不足结果直接过滤，不以漏标率作为本轮失败标准。
+
+## 20. 合理多标与跨维度边界精判v7
+
+v7根据v4/v6同一300题的逐题复核调整。它不再强求“最小Label集合”：同一题中只要多个Label均符合老师释义且能由设问、选项、答案或解析直接支持，就允许同时保留。同时增加“考查维度”硬边界，禁止把原理替代为实验、结论替代为发展史、跨膜运输替代为水的存在形式。
+
+v7删除`evidence`输出，避免模型为已选Label反向寻找表面词证据。模型只输出：
+
+```json
+{
+  "selected": ["C01", "C05"],
+  "need_expand_recall": false,
+  "context_insufficient": false
+}
+```
+
+状态口径：
+
+- 候选中只有相近但跨维度的Label：不硬选，`need_expand_recall=true`。
+- 已能选出至少一个准确Label，仅可能漏掉次要项：`need_expand_recall=false`。
+- 答案或解析已足够确定至少一个Label：即使缺图也保持`context_insufficient=false`。
+- 非生物题或无有效设问：`selected=[]`，两个状态均为`false`，仍由空结果过滤。
+
+为了只测Prompt变化，v7继续使用原300题和原Top25候选，不同时引入Top30或taxonomy兄弟扩展。因此“施肥烧苗”在本轮的正确行为是拒绝“观察质壁分离实验”并进入扩召，而不是直接产生未召回的渗透作用Label。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V7_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v7-balanced"
+mkdir -p "$V7_RUN"
+printf '%s\n' "$V7_RUN" > runtime/LATEST_ADJUDICATION_V7_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V7_RUN" \
+  --endpoint 'http://172.22.0.35:9104/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 2 \
+  --max-tokens 256 \
+  > "$V7_RUN/nohup.log" 2>&1 &
+
+printf '%s\n' "$!" > "$V7_RUN/pid"
+printf 'V7_RUN=%s PID=%s\n' "$V7_RUN" "$(cat "$V7_RUN/pid")"
+```
+
+完成标准：`input=processed=success=300`、`error=pending=0`、`prompt_version=candidate-adjudication-v7-balanced-precision`。优先对照`docs/pilot-v4-v6-300-question-review.md`中的7道“v6精度改差”、7道“v6覆盖下降”和2道“路由状态改差”：前者应消除跨维度错标，后两类不应因过度保守继续丢失可判断样本。

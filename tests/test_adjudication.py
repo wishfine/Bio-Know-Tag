@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from bio_know_tag.adjudication import (
+    PROMPT_VERSION,
     build_adjudication_prompt,
     run_adjudication,
     validate_adjudication_result,
@@ -66,8 +67,8 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert "知识点@模块@标签一" in prompt
     assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
-    assert "错选一个Label比漏选更严重" in prompt
-    assert "允许少选，也允许selected为空" in prompt
+    assert "合理多标可以保留" in prompt
+    assert "允许selected为空" in prompt
     assert "删除测试" not in prompt
     assert '"parent_context_missing": false' in prompt
     assert '"image_context_missing": false' in prompt
@@ -93,53 +94,56 @@ def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
     )
 
     assert q1_first == q1_second
-    assert list(q1_first.values()) != ["L1", "L2", "L3"]
     assert list(q1_first.values()) != list(q2.values())
 
 
-def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
-    valid = {
-        "selected": [
+def test_v7_prompt_allows_reasonable_multilabel_without_cross_dimension_substitution():
+    labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
+    prompt, _ = build_adjudication_prompt(
+        _unit(), [_candidate(1), _candidate(2)], labels
+    )
+
+    assert PROMPT_VERSION == "candidate-adjudication-v7-balanced-precision"
+    assert "允许同时选择多个合理Label" in prompt
+    assert "同一对象但考查维度不同" in prompt
+    assert "原理、实验、应用、结论和发展史" in prompt
+    assert "边界匹配优先于粒度具体" in prompt
+    assert '"selected": ["C01", "C05"]' in prompt
+    assert "evidence" not in prompt
+
+
+def test_validate_v7_adjudication_accepts_only_short_code_list():
+    result = validate_adjudication_result(
+        {
+            "selected": ["C02", "C01", "C02"],
+            "need_expand_recall": False,
+            "context_insufficient": False,
+        },
+        {"C01", "C02"},
+    )
+
+    assert result["selected"] == ["C02", "C01"]
+    assert result["none_of_candidates"] is False
+    with pytest.raises(ValueError, match="short codes"):
+        validate_adjudication_result(
             {
-                "code": "C01",
-                "evidence": "解析",
-            }
-        ],
+                "selected": [{"code": "C01", "evidence": "题干"}],
+                "need_expand_recall": False,
+                "context_insufficient": False,
+            },
+            {"C01"},
+        )
+
+
+def test_validate_adjudication_derives_empty_state():
+    valid = {
+        "selected": ["C01"],
         "need_expand_recall": False,
         "context_insufficient": False,
     }
-    validated = validate_adjudication_result(
-        valid, {"C01", "C02"}, question_evidence_text="题干 答案 解析"
-    )
-    assert validated["selected"][0]["question_evidence_verified"] is True
-
-    with pytest.raises(ValueError, match="evidence"):
-        validate_adjudication_result(
-            {
-                **valid,
-                "selected": [
-                    {
-                        "code": "C01",
-                        "evidence": "",
-                    }
-                ],
-            },
-            {"C01", "C02"},
-        )
-    unverified = validate_adjudication_result(
-        {
-            **valid,
-            "selected": [
-                {
-                    "code": "C01",
-                    "evidence": "补写的上下文；题干",
-                }
-            ],
-        },
-        {"C01", "C02"},
-        question_evidence_text="题干 答案",
-    )
-    assert unverified["selected"][0]["question_evidence_verified"] is False
+    assert validate_adjudication_result(valid, {"C01", "C02"})["selected"] == [
+        "C01"
+    ]
     empty = validate_adjudication_result(
         {**valid, "selected": []},
         {"C01", "C02"},
@@ -151,13 +155,13 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
     ("selected", "expand", "context", "valid"),
     [
         (
-            [{"code": "C01", "evidence": "题干"}],
+            ["C01"],
             False,
             False,
             True,
         ),
         (
-            [{"code": "C01", "evidence": "题干"}],
+            ["C01"],
             True,
             False,
             True,
@@ -165,7 +169,7 @@ def test_validate_adjudication_requires_evidence_and_consistent_empty_state():
         ([], True, False, True),
         ([], False, True, True),
         ([], False, False, True),
-        ([{"code": "C01", "evidence": "题干"}], False, False, True),
+        (["C01"], False, False, True),
         ("not-a-list", False, False, False),
     ],
 )
@@ -178,15 +182,11 @@ def test_validate_adjudication_candidate_and_context_states(
         "context_insufficient": context,
     }
     if valid:
-        result = validate_adjudication_result(
-            value, {"C01"}, question_evidence_text="题干"
-        )
+        result = validate_adjudication_result(value, {"C01"})
         assert result["context_insufficient"] is context
     else:
         with pytest.raises(ValueError):
-            validate_adjudication_result(
-                value, {"C01"}, question_evidence_text="题干"
-            )
+            validate_adjudication_result(value, {"C01"})
 
 
 def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
@@ -229,12 +229,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     class Response:
         content = json.dumps(
             {
-                "selected": [
-                    {
-                        "code": code_for_l23,
-                        "evidence": "根据解析可知",
-                    }
-                ],
+                "selected": [code_for_l23],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -293,14 +288,13 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["token_usage"]["mean_completion_tokens"] == 20.0
     assert report["requests_retried"] == 1
     assert report["retry_error_types"] == {"ConnectionResetError": 1}
-    assert report["unverified_evidence_items"] == 1
-    assert report["questions_with_unverified_evidence"] == 1
-    assert prediction["selected_labels"][0]["evidence_verified"] is False
+    assert "unverified_evidence_items" not in report
+    assert "questions_with_unverified_evidence" not in report
+    assert "evidence" not in prediction["selected_labels"][0]
+    assert "evidence_verified" not in prediction["selected_labels"][0]
     assert "necessity" not in prediction["selected_labels"][0]
     assert prediction["usable_for_training"] is True
     assert "missing_knowledge" not in prediction
-    # Evidence substring matching is diagnostic only. A semantically useful
-    # paraphrase must not create a manual-review task by itself.
     assert prediction["needs_review"] is False
     evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
     assert evidence["usage"]["total_tokens"] == 120
@@ -340,12 +334,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
     class Response:
         content = json.dumps(
             {
-                "selected": [
-                    {
-                        "code": "C01",
-                        "evidence": "题干",
-                    }
-                ],
+                "selected": ["C01"],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -417,7 +406,7 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
     class Response:
         content = json.dumps(
             {
-                "selected": [{"code": "C01", "evidence": "题干"}],
+                "selected": ["C01"],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -466,8 +455,8 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
     ("selected", "expand", "context", "expected_reason"),
     [
         ([], False, False, "empty_selected"),
-        ([{"code": "C01", "evidence": "题干"}], True, False, "need_expand_recall"),
-        ([{"code": "C01", "evidence": "题干"}], False, True, "context_insufficient"),
+        (["C01"], True, False, "need_expand_recall"),
+        (["C01"], False, True, "context_insufficient"),
     ],
 )
 def test_run_adjudication_filters_risky_training_rows(
