@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8.3-internal-reflection"
+PROMPT_VERSION = "candidate-adjudication-v8.4-current-question-first"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -88,19 +88,21 @@ def build_adjudication_prompt(
                 "distinctions": label.get("distinctions", ""),
             }
         )
-    question = {
+    current_question = {
         "question_id": question_id,
         "unit_type": unit.get("unit_type", ""),
-        "parent_stem": str(unit.get("parent_stem") or "")[:3000],
         "stem": str(unit.get("stem") or "")[:5000],
         "options": str(unit.get("options") or "")[:3000],
         "answer_text": str(unit.get("answer_text") or "")[:2000],
         "analysis": str(unit.get("analysis") or "")[:6000],
-        "parent_context_missing": bool(
-            (unit.get("flags") or {}).get("parent_context_missing")
-        ),
         "image_context_missing": bool(
             (unit.get("flags") or {}).get("image_context_missing")
+        ),
+    }
+    parent_context = {
+        "parent_stem": str(unit.get("parent_stem") or "")[:3000],
+        "parent_context_missing": bool(
+            (unit.get("flags") or {}).get("parent_context_missing")
         ),
     }
     prompt = f"""你是严谨的高中生物知识点判标器。本任务采用非对称损失：错标的代价远高于漏标。可以少选、置空或扩召，绝不得把只是相关、更宽泛或边界不同的Label写入selected。
@@ -128,8 +130,13 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 
 只能返回C01等短代码，不能抄写长label_id。
 
-题目：
-{json.dumps(question, ensure_ascii=False)}
+【唯一判标对象：当前小题】
+当前小题：
+{json.dumps(current_question, ensure_ascii=False)}
+
+【仅用于补全指代，不得作为独立判标依据】
+父题公共材料：
+{json.dumps(parent_context, ensure_ascii=False)}
 
 候选Label（顺序不代表最终正确性）：
 {json.dumps(candidate_cards, ensure_ascii=False)}

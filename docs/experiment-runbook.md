@@ -1218,5 +1218,47 @@ printf 'V83_RUN=%s PID=%s\n' "$V83_RUN" "$PID"
 2. 两基因三种表型应选连锁，不得用分离/自由组合替代。
 3. 小分子跨膜不得选胞吞胞吐。
 4. ABA-Cl⁻载体题不得选蛋白质变性/泛化功能。
-5. 固定化脂酶题在无准确现行Label时不得选尿素分解菌。
+5. 固定化脲酶题不得因父题的菌株分离背景选尿素分解菌；当前458中固定化酶归入“酶的保存及应用”。
 6. 预测与报告中不应再出现`rejected_risky`或`output_conflict`字段；错标是否被排除只通过最终`selected_labels`和回归题人工审核判断。
+
+### 24.1 v8.4当前小题优先消融
+
+v8.3的300题结果中，固定化脲酶小题仍被父题“从土壤中分离胞外脲酶高产菌株”带偏，错选“分离以尿素为氮源的微生物”。v8.4仅改变题目语境的呈现顺序，不改候选、Label Card、判标门槛和输出结构：
+
+```text
+【唯一判标对象：当前小题】
+当前小题 / 选项 / 答案 / 解析
+
+【仅用于补全指代，不得作为独立判标依据】
+父题公共材料
+```
+
+使用原300题和原Top25进行单变量复测：
+
+```bash
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V84_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-4-current-first"
+mkdir -p "$V84_RUN"
+printf '%s\n' "$V84_RUN" > runtime/LATEST_ADJUDICATION_V84_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V84_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$V84_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V84_RUN/pid"
+printf 'V84_RUN=%s PID=%s\n' "$V84_RUN" "$PID"
+```
+
+验收时先检查固定化脲酶题`2326198965676548098`是否从“分离以尿素为氮源的微生物”改为“酶的保存及应用”；同时比较总空标数、`context_insufficient`、`need_expand_recall`和已知回归题，避免为修复一题造成系统性覆盖下降。

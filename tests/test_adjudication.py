@@ -100,13 +100,13 @@ def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
     assert any(list(q1_first.values()) != order for order in other_orders)
 
 
-def test_v83_prompt_keeps_internal_reflection_without_rejection_output():
+def test_v84_prompt_keeps_internal_reflection_without_rejection_output():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8.3-internal-reflection"
+    assert PROMPT_VERSION == "candidate-adjudication-v8.4-current-question-first"
     assert "错标的代价远高于漏标" in prompt
     assert "五道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -123,7 +123,29 @@ def test_v83_prompt_keeps_internal_reflection_without_rejection_output():
     assert "evidence" not in prompt
 
 
-def test_validate_v83_adjudication_accepts_only_final_selected_codes():
+def test_prompt_presents_current_question_before_parent_context():
+    labels = {"L1": _label("L1", "标签一")}
+    unit = {
+        **_unit(),
+        "parent_stem": "父题背景唯一标识",
+        "stem": "当前小题唯一标识",
+        "answer_text": "当前答案唯一标识",
+        "analysis": "当前解析唯一标识",
+    }
+
+    prompt, _ = build_adjudication_prompt(unit, [_candidate(1)], labels)
+
+    current_section = prompt.index("【唯一判标对象：当前小题】")
+    parent_section = prompt.index("【仅用于补全指代，不得作为独立判标依据】")
+    candidates_section = prompt.index("候选Label（顺序不代表最终正确性）：")
+
+    assert current_section < prompt.index("当前小题：") < parent_section
+    assert prompt.index("当前答案唯一标识") < parent_section
+    assert prompt.index("当前解析唯一标识") < parent_section
+    assert parent_section < prompt.index("父题公共材料：") < candidates_section
+
+
+def test_validate_v84_adjudication_accepts_only_final_selected_codes():
     result = validate_adjudication_result(
         {
             "selected": ["C02", "C01", "C02"],
