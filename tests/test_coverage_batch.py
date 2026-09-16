@@ -9,6 +9,7 @@ from bio_know_tag.coverage_batch import (
     normalize_batch_response,
     run_coverage_batches,
 )
+from bio_know_tag.ds import DSRequestError
 
 
 def _task(index: int, label_id: str = "L1", context: str = "题目") -> dict:
@@ -129,3 +130,134 @@ def test_run_coverage_batches_writes_resumable_compact_results(tmp_path: Path):
     result = json.loads((output / "results.jsonl").read_text())
     assert result["relevance_score"] == 0.93
     assert "reason" not in result
+
+
+def test_run_coverage_batches_splits_batches_after_reproducible_http_400(tmp_path: Path):
+    tasks_path = tmp_path / "tasks.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "run"
+    tasks_path.write_text(
+        "".join(
+            json.dumps(_task(index), ensure_ascii=False) + "\n"
+            for index in (1, 2)
+        ),
+        encoding="utf-8",
+    )
+    labels_path.write_text(json.dumps(_label(), ensure_ascii=False) + "\n", encoding="utf-8")
+
+    class Response:
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.1
+        usage = {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120}
+        retry_errors = ()
+
+        def __init__(self, task_id: str, question_id: str):
+            self.content = json.dumps(
+                {
+                    "results": [
+                        {
+                            "task_id": task_id,
+                            "question_id": question_id,
+                            "match": True,
+                            "relevance_score": 0.93,
+                        }
+                    ]
+                }
+            )
+
+    class Client:
+        calls = 0
+
+        def chat(self, messages, *, max_tokens):
+            self.calls += 1
+            prompt = messages[0]["content"]
+            if '"task_id": "q1::L1"' in prompt and '"task_id": "q2::L1"' in prompt:
+                raise DSRequestError(
+                    "chat completion failed after 3 attempts: HTTP Error 400: Bad Request",
+                    attempts=3,
+                    endpoint="fake",
+                    latency_seconds=0.1,
+                    retry_errors=[
+                        {
+                            "attempt": 3,
+                            "endpoint": "fake",
+                            "error_type": "HTTPError",
+                            "error": "HTTP Error 400: Bad Request",
+                        }
+                    ],
+                )
+            if '"task_id": "q1::L1"' in prompt:
+                return Response("q1::L1", "q1")
+            return Response("q2::L1", "q2")
+
+    client = Client()
+    report = run_coverage_batches(
+        tasks_path,
+        labels_path,
+        output,
+        client,
+        model="fake",
+        max_batch_size=2,
+    )
+
+    assert report["success"] == 2
+    assert report["pending"] == 0
+    assert report["failed_batches"] == 0
+    assert client.calls == 3
+    evidence = [json.loads(line) for line in (output / "evidence.jsonl").read_text().splitlines()]
+    assert [row["batch_size"] for row in evidence] == [2, 1, 1]
+    assert evidence[0]["adaptive_split"] is True
+
+
+def test_run_coverage_batches_splits_batches_after_invalid_structured_output(tmp_path: Path):
+    tasks_path = tmp_path / "tasks.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "run"
+    tasks_path.write_text(
+        "".join(json.dumps(_task(index), ensure_ascii=False) + "\n" for index in (1, 2)),
+        encoding="utf-8",
+    )
+    labels_path.write_text(json.dumps(_label(), ensure_ascii=False) + "\n", encoding="utf-8")
+
+    class Response:
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.1
+        usage = None
+        retry_errors = ()
+
+        def __init__(self, results: list[dict]):
+            self.content = json.dumps({"results": results})
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            prompt = messages[0]["content"]
+            if '"task_id": "q1::L1"' in prompt and '"task_id": "q2::L1"' in prompt:
+                return Response([])
+            question_id = "q1" if '"task_id": "q1::L1"' in prompt else "q2"
+            return Response(
+                [
+                    {
+                        "task_id": f"{question_id}::L1",
+                        "question_id": question_id,
+                        "match": True,
+                        "relevance_score": 0.9,
+                    }
+                ]
+            )
+
+    report = run_coverage_batches(
+        tasks_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake",
+        max_batch_size=2,
+    )
+
+    assert report["success"] == 2
+    assert report["failed_batches"] == 0
+    evidence = [json.loads(line) for line in (output / "evidence.jsonl").read_text().splitlines()]
+    assert evidence[0]["error"] == "ValueError: results count mismatch"
+    assert evidence[0]["adaptive_split"] is True

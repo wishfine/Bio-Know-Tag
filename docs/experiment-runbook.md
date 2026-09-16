@@ -1589,6 +1589,8 @@ PYTHONPATH=src python scripts/run_definition_coverage_batches.py \
 
 确认`report.json`中`input=processed=success=20`、`error=pending=0`、Prompt版本为`label-definition-coverage-mentor-batch-v1`后，再用`boundary_samples.jsonl`启动全量。全量必须新建目录并后台运行；失败批次保留在`evidence.jsonl`，使用完全相同命令和run目录即可只续跑未成功任务。
 
+续跑时，若某批稳定返回HTTP 400，或DS的结构化输出数量/ID无法校验，运行器会自动二分该批并递归重试，直到子批成功或单题仍失败。该机制不会重跑`results.jsonl`中已成功的任务；`evidence.jsonl`会同时保留原失败批和拆分后子批，并用`adaptive_split`标记是否发生拆分。连接重置、超时等非确定性服务错误不会递归拆批，避免服务整体不可用时放大请求数。
+
 运行期间可以对追加中的`results.jsonl`建立只读快照并生成中期报告。先复制结果，避免分析时读到正在写入的最后一行；分析脚本即使遇到半行也会忽略并报告。中期分档只作筛查，未完成Label不下最终结论，且正样本实验不能单独判断释义偏宽。
 
 ```bash

@@ -307,7 +307,7 @@ def run_coverage_batches(
     write_lock = threading.Lock()
     failed_batches = 0
 
-    def judge(batch: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    def judge_once(batch: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         label_id = str(batch[0]["label_id"])
         if label_id not in labels:
             raise ValueError(f"unknown label_id: {label_id}")
@@ -373,22 +373,48 @@ def run_coverage_batches(
                 "error": f"{type(exc).__name__}: {exc}",
             }
 
+    def judge(
+        batch: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+        """Judge one batch, bisecting deterministic request/format failures."""
+        normalized, evidence = judge_once(batch)
+        if normalized:
+            evidence["adaptive_split"] = False
+            return normalized, [evidence], 0
+
+        error = str(evidence.get("error") or "")
+        should_split = len(batch) > 1 and (
+            error.startswith("ValueError:") or "HTTP Error 400" in error
+        )
+        evidence["adaptive_split"] = should_split
+        if not should_split:
+            return [], [evidence], 1
+
+        midpoint = len(batch) // 2
+        left_results, left_evidence, left_failures = judge(batch[:midpoint])
+        right_results, right_evidence, right_failures = judge(batch[midpoint:])
+        return (
+            left_results + right_results,
+            [evidence, *left_evidence, *right_evidence],
+            left_failures + right_failures,
+        )
+
     finished_batches = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {executor.submit(judge, batch): batch for batch in batches}
         for future in as_completed(futures):
-            normalized, evidence = future.result()
+            normalized, evidence_rows, leaf_failures = future.result()
             with write_lock:
                 with evidence_path.open("a", encoding="utf-8") as output:
-                    output.write(json.dumps(evidence, ensure_ascii=False, sort_keys=True) + "\n")
+                    for evidence in evidence_rows:
+                        output.write(json.dumps(evidence, ensure_ascii=False, sort_keys=True) + "\n")
                 if normalized:
                     with results_path.open("a", encoding="utf-8") as output:
                         for result in normalized:
                             result["model"] = model
                             output.write(json.dumps(result, ensure_ascii=False, sort_keys=True) + "\n")
                             completed[str(result["task_id"])] = result
-                else:
-                    failed_batches += 1
+                failed_batches += leaf_failures
             finished_batches += 1
             print(
                 f"batch {finished_batches}/{len(batches)} tasks={len(completed)}/{len(tasks)} "
@@ -433,4 +459,3 @@ def run_coverage_batches(
                 + "\n"
             )
     return report
-
