@@ -1607,3 +1607,98 @@ PYTHONPATH=src python scripts/analyze_definition_coverage_snapshot.py \
 ```
 
 输出包括`analysis/snapshot_report.json`、`snapshot_report.md`、`per_label.jsonl`和`review_samples.jsonl`。`per_label.jsonl`中的等级为中期筛查等级，并明确把“偏宽”标为尚未测试；需要硬负样本实验后才能判定。
+
+## 27. 独立题硬负样本边界实验
+
+正样本全量完成后，从`relevance_score>=0.80`的高置信独立题中，为同父级兄弟Label构造硬负样本。题目原有当前458标签中已经包含目标Label时必须排除；每个目标Label最多50题，并在不同来源兄弟Label之间轮询均衡。历史未打目标Label本身不是金标准负样本，因此最终仍需抽查误收案例。
+
+### 27.1 生成正样本最终分析
+
+```bash
+STANDALONE_SAMPLE_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_STANDALONE_SAMPLE_RUN)"
+STANDALONE_FULL_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_STANDALONE_FULL_RUN)"
+POSITIVE_ANALYSIS_RUN="runtime/$(date +%Y%m%d-%H%M%S)-standalone-positive-analysis"
+
+PYTHONPATH=src python scripts/analyze_definition_coverage_snapshot.py \
+  --tasks "$STANDALONE_SAMPLE_RUN/boundary_samples.jsonl" \
+  --results "$STANDALONE_FULL_RUN/results.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$POSITIVE_ANALYSIS_RUN" \
+  --samples-per-band 5
+
+printf '%s\n' "$POSITIVE_ANALYSIS_RUN" > runtime/LATEST_STANDALONE_POSITIVE_ANALYSIS_RUN
+```
+
+### 27.2 构造硬负样本
+
+```bash
+UPDATED_UNIT_RUN="$(cat runtime/LATEST_UPDATED_LABEL_UNITS_RUN)"
+HARD_NEG_SAMPLE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-verified-sibling-hard-negatives"
+
+PYTHONPATH=src python scripts/build_verified_hard_negatives.py \
+  --positive-tasks "$STANDALONE_SAMPLE_RUN/boundary_samples.jsonl" \
+  --positive-results "$STANDALONE_FULL_RUN/results.jsonl" \
+  --units "$UPDATED_UNIT_RUN/label_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$HARD_NEG_SAMPLE_RUN" \
+  --negatives-per-label 50 \
+  --min-source-score 0.80 \
+  --seed verified-sibling-hard-negative-v1
+
+printf '%s\n' "$HARD_NEG_SAMPLE_RUN" > runtime/LATEST_HARD_NEGATIVE_SAMPLE_RUN
+python -m json.tool "$HARD_NEG_SAMPLE_RUN/report.json"
+wc -l "$HARD_NEG_SAMPLE_RUN/hard_negative_samples.jsonl"
+```
+
+默认要求正样本179568条全部完成，否则拒绝构造；不要使用`--allow-partial-positive-results`生成正式实验。
+
+### 27.3 DS判别硬负样本
+
+```bash
+HARD_NEG_DS_RUN="runtime/$(date +%Y%m%d-%H%M%S)-hard-negative-judge-w30"
+mkdir -p "$HARD_NEG_DS_RUN"
+printf '%s\n' "$HARD_NEG_DS_RUN" > runtime/LATEST_HARD_NEGATIVE_DS_RUN
+
+nohup env PYTHONPATH=src python scripts/run_definition_coverage_batches.py \
+  --tasks "$HARD_NEG_SAMPLE_RUN/hard_negative_samples.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$HARD_NEG_DS_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 30 \
+  --max-batch-size 40 \
+  --char-budget 55000 \
+  --max-tokens 7000 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  > "$HARD_NEG_DS_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$HARD_NEG_DS_RUN/pid"
+```
+
+### 27.4 负样本分析及正负二维分档
+
+```bash
+HARD_NEG_ANALYSIS_RUN="runtime/$(date +%Y%m%d-%H%M%S)-hard-negative-analysis"
+PYTHONPATH=src python scripts/analyze_hard_negative_results.py \
+  --samples "$HARD_NEG_SAMPLE_RUN/hard_negative_samples.jsonl" \
+  --results "$HARD_NEG_DS_RUN/results.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$HARD_NEG_ANALYSIS_RUN"
+
+printf '%s\n' "$HARD_NEG_ANALYSIS_RUN" > runtime/LATEST_HARD_NEGATIVE_ANALYSIS_RUN
+
+COMBINED_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-boundary-combined"
+PYTHONPATH=src python scripts/combine_definition_boundary_results.py \
+  --positive-per-label "$POSITIVE_ANALYSIS_RUN/per_label.jsonl" \
+  --negative-per-label "$HARD_NEG_ANALYSIS_RUN/per_label.jsonl" \
+  --run-dir "$COMBINED_RUN"
+
+printf '%s\n' "$COMBINED_RUN" > runtime/LATEST_DEFINITION_BOUNDARY_COMBINED_RUN
+python -m json.tool "$COMBINED_RUN/report.json"
+```
+
+负样本误收率初筛：不超过5%为稳定，5%至15%为轻微边界风险，15%至30%为疑似偏宽/重叠，超过30%为严重边界冲突。组合报告对少于300道正样本的Label始终保留`U_LONG_TAIL_REVIEW`，不会因比例自动修改释义。
