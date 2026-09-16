@@ -1179,6 +1179,7 @@ v7恢复了覆盖，但300题复核仍发现“渗透失水→质壁分离实验
 - Prompt不写入300题中已知错例，避免评测泄漏和针对个别题目过拟合；这些题只作回归验收集。
 - v8.1的风险优先顺序使模型过度进入否决模式；299题中265题输出了`rejected_risky`，可训练题从v7的286降至184。v8.2只改回`selected → rejected_risky → context_insufficient → need_expand_recall`生成顺序，其他Prompt和程序逻辑不变，作为单变量顺序消融。
 - v8.1明确`rejected_risky`不是所有未选候选的列表。若模型仍输出超过3项或与`selected`重叠，程序按“拒绝优先”保守归一化，设置`output_conflict=true`并禁止该题进入训练，不再无限重试。
+- v8.2将可训练题恢复到239，证明顺序有影响；但265/299题仍输出显式风险候选，且仍有错标。v8.3因此彻底删除该输出字段及其归一化/过滤逻辑，只保留内部反证过程。
 
 为了只比较Prompt，v8仍先使用原300题和原Top25，不同时接入旧ID增强候选：
 
@@ -1187,15 +1188,15 @@ cd /local_data/zhangyonglin/Bio-Know-Tag
 git pull --ff-only origin main
 
 AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
-V82_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-2-selected-first"
-mkdir -p "$V82_RUN"
-printf '%s\n' "$V82_RUN" > runtime/LATEST_ADJUDICATION_V82_RUN
+V83_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-3-internal-reflection"
+mkdir -p "$V83_RUN"
+printf '%s\n' "$V83_RUN" > runtime/LATEST_ADJUDICATION_V83_RUN
 
 nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
   --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
   --labels configs/labels.jsonl \
-  --run-dir "$V82_RUN" \
+  --run-dir "$V83_RUN" \
   --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
   --model 'DeepSeek-V4-Flash' \
   --workers 20 \
@@ -1204,19 +1205,18 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --retry-delay 1 \
   --request-interval 0 \
   --max-tokens 256 \
-  > "$V82_RUN/nohup.log" 2>&1 &
+  > "$V83_RUN/nohup.log" 2>&1 &
 
 PID=$!
-printf '%s\n' "$PID" > "$V82_RUN/pid"
-printf 'V82_RUN=%s PID=%s\n' "$V82_RUN" "$PID"
+printf '%s\n' "$PID" > "$V83_RUN/pid"
+printf 'V83_RUN=%s PID=%s\n' "$V83_RUN" "$PID"
 ```
 
-完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8.2-selected-first-ablation`。精度验收优先级高于`usable_for_training`数量：
+完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8.3-internal-reflection`。精度验收优先级高于`usable_for_training`数量：
 
 1. 施肥烧苗不得选质壁分离实验；原Top25缺正确渗透Label时应空标+扩召。
 2. 两基因三种表型应选连锁，不得用分离/自由组合替代。
 3. 小分子跨膜不得选胞吞胞吐。
 4. ABA-Cl⁻载体题不得选蛋白质变性/泛化功能。
 5. 固定化脂酶题在无准确现行Label时不得选尿素分解菌。
-6. `rejected_risky_labels`必须与`selected_labels`分离；报告会统计`rejected_risky_count`和`questions_with_rejected_risky`。
-7. `output_conflict`的题不得进入训练；报告会统计风险列表截断、选中/拒绝重叠和强制扩召次数。
+6. 预测与报告中不应再出现`rejected_risky`或`output_conflict`字段；错标是否被排除只通过最终`selected_labels`和回归题人工审核判断。
