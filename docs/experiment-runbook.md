@@ -1391,11 +1391,13 @@ printf 'V86_LEGACY_RUN=%s PID=%s\n' "$V86_LEGACY_RUN" "$PID"
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
 
-RAW='/local_data/zhangyonglin/data/bio-know-tag/biology.raw.jsonl'
+RAW="$(find /local_data/zhangyonglin/data/bio-know-tag -maxdepth 1 -type f -name 'biology.raw*jsonl' -print -quit)"
 UPDATE_ROOT='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/update-data'
 MERGED_RAW='/local_data/zhangyonglin/data/bio-know-tag/biology.with-update-20260914.raw.jsonl'
 MERGE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-merge-biology-updates"
 
+test -n "$RAW" || { echo '找不到biology.raw*.jsonl' >&2; exit 1; }
+printf 'RAW=%s\n' "$RAW"
 mkdir -p "$MERGE_RUN"
 PYTHONPATH=src python scripts/merge_question_updates.py \
   --base "$RAW" \
