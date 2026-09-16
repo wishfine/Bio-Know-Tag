@@ -1550,3 +1550,11 @@ printf 'COVERAGE_RUN=%s PID=%s\n' "$COVERAGE_RUN" "$PID"
 ```
 
 报告输出：`report.json`给总体分段、题型、差异类型和按题最高分的A/B/C/D级；`per_label.jsonl`给逐Label匹配率、均分、0分率、灰度区及差异类型；`predictions.jsonl`保留逐题逐Label的分数和理由。重点把`definition_too_narrow`与`legacy_label_wrong`分开，避免将旧题错标误诊为老师释义问题。
+
+释义覆盖v2的20-Label smoke虽然20/20请求成功，但暴露三类一般性边界错误：只考Label内一个明确子主题时可能被过严拒绝；不同实验模块仅共享“消毒/无菌”等操作时可能被错误接纳；“综合”Label可能在未满足多方面联动门槛时被过宽接纳。v3据此仅调整一般规则，不加入具体题目或具体Label补丁：
+
+1. 题目直接考查definition/core_concepts中的任一明确子主题即可匹配，无需覆盖释义全部内容；
+2. 共享实验动作、工具或关键词不等于知识对象和任务目标相同；
+3. 名称/释义明确为综合或整合的Label必须满足其多方面联动要求。
+
+v3 Prompt版本为`label-definition-coverage-v3-boundary-calibrated`，必须使用新run目录与同一批smoke题复测，再决定是否启动全量。

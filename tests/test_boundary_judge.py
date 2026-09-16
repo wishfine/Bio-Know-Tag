@@ -120,6 +120,9 @@ def test_boundary_prompt_contains_teacher_fields_and_no_legacy_ids():
     assert "distinctions：与转录区分。" in prompt
     assert "legacy_knw_ids" not in prompt
     assert "常见考查方式是示例而不是穷举清单" in prompt
+    assert "无需覆盖该Label释义中的全部组成部分" in prompt
+    assert "仅共享实验动作、工具、方法或关键词" in prompt
+    assert "综合类Label" in prompt
     assert '"score":0.92' in prompt
     assert '"difference_type":"matched"' in prompt
 

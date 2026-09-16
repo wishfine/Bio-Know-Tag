@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.legacy_validation import valid_legacy_targets
 
 
-PROMPT_VERSION = "label-definition-coverage-v2"
+PROMPT_VERSION = "label-definition-coverage-v3-boundary-calibrated"
 MATCH_THRESHOLD = 0.70
 DIFFERENCE_TYPES = {
     "matched",
@@ -240,12 +240,16 @@ def build_boundary_prompt(sample: dict[str, Any], label: dict[str, Any]) -> str:
 只判断当前题目；父题材料只用于补全当前小题的指代和语境。
 
 判定原则：
-1. 只有正确解题、判断选项或解析核心推理直接需要该知识点，才算匹配。
-2. 材料背景、实验工具、弱相关联想、仅时间/章节相邻、宽泛上位概念，不算匹配。
-3. 对小题，父题级Label并不自动属于每个小题；若只属于父题或兄弟小题，应识别为parent_union_not_child。
+1. 先独立概括当前题目的实际考点，再核对Label；不要先看Label后从题中寻找牵强证据。
+2. 只有正确解题、判断选项或解析核心推理直接需要该知识点，才算匹配。
+3. 若题目直接考查definition或core_concepts明确包含的一个子主题，即可匹配；无需覆盖该Label释义中的全部组成部分，也不要求同时考查与其他概念的比较。
 4. common_assessments中的常见考查方式是示例而不是穷举清单；题目未逐字命中示例，但实质属于该Label时仍可高分。
-5. 若Label名称明显适合、但老师释义遗漏了正常且重要的考查范围，应标为definition_too_narrow，而不是简单断言旧标签错误。
-6. 不得因为历史上可能打过该标签而迁就；你看不到旧ID，只依据题目和老师给出的Label信息判断。
+5. 必须同时核对知识对象和任务目标。仅共享实验动作、工具、方法或关键词，但实验对象、所属模块或实际考点不同，不算匹配。
+6. 对名称或释义明确为“综合、整合、综合分析”的综合类Label，只有题目实际联动了释义或distinctions要求的多个方面时才匹配；只考一个原子知识点不能用综合Label兜底。
+7. 材料背景、弱相关联想、仅时间/章节相邻、宽泛上位概念，不算匹配。
+8. 对小题，父题级Label并不自动属于每个小题；若只属于父题或兄弟小题，应识别为parent_union_not_child。
+9. 若Label名称和高中生物标准含义明显适合、但老师四字段遗漏了正常且重要的考查范围，应标为definition_too_narrow，而不是简单断言旧标签错误。
+10. 不得因为历史上可能打过该标签而迁就；你看不到旧ID，只依据题目和老师给出的Label信息判断。
 
 分数标准：
 - 0.90-1.00：核心考点明确属于该Label，边界清楚。
