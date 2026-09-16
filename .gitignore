@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 runtime/*
 !runtime/.gitkeep
+received/
 source/raw/*
 !source/raw/README.md
 .DS_Store
