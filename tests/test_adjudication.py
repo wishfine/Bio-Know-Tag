@@ -121,13 +121,13 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v85_prompt_restores_v83_layout_and_puts_reason_first():
+def test_v86_prompt_restores_v83_layout_and_puts_reason_last():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8.5-v83-reason-first"
+    assert PROMPT_VERSION == "candidate-adjudication-v8.6-v83-reason-last"
     assert "错标的代价远高于漏标" in prompt
     assert "五道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -141,9 +141,9 @@ def test_v85_prompt_restores_v83_layout_and_puts_reason_first():
     assert '"reason": "当前设问直接考查……"' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
-    assert schema.index('"reason"') < schema.index('"selected"')
     assert schema.index('"selected"') < schema.index('"context_insufficient"')
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
+    assert schema.index('"need_expand_recall"') < schema.index('"reason"')
     assert "evidence" not in prompt
 
 

@@ -1294,3 +1294,37 @@ PID=$!
 printf '%s\n' "$PID" > "$V85_RUN/pid"
 printf 'V85_RUN=%s PID=%s\n' "$V85_RUN" "$PID"
 ```
+
+实测v8.5将可训练题从v8.3的218提高到283，空标从67降至12，但重新引入“施肥烧苗→动物细胞吸水失水实验/质壁分离实验”等明确错标。`reason`显示模型会先形成宽泛的“相关即可选”叙述，再据此扩张`selected`。因此v8.5只作为诊断版本，不用于生产。
+
+### 24.3 v8.6 selected-first、reason-last顺序消融
+
+v8.6与v8.5使用完全相同的题目布局、候选、候选代码排列、判标规则和reason要求；唯一变化是输出顺序由`reason → selected → 状态`改为`selected → 状态 → reason`。用于区分“要求输出reason本身”与“reason先生成”对选标结果的影响。
+
+```bash
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V86_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-6-reason-last"
+mkdir -p "$V86_RUN"
+printf '%s\n' "$V86_RUN" > runtime/LATEST_ADJUDICATION_V86_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V86_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$V86_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V86_RUN/pid"
+printf 'V86_RUN=%s PID=%s\n' "$V86_RUN" "$PID"
+```
+
+核心比较：v8.6与v8.3的Label集合一致率、v8.6与v8.5的一致率、可训练/空标/context/expand，以及施肥烧苗、固定化脲酶、ABA-Cl⁻、基因连锁、水跨膜、新冠疫苗等回归题。

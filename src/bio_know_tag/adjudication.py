@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8.5-v83-reason-first"
+PROMPT_VERSION = "candidate-adjudication-v8.6-v83-reason-last"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -141,10 +141,10 @@ reason用1至2句话、不超过120字，说明当前设问、答案或解析如
 
 只输出一个JSON对象：
 {{
-  "reason": "当前设问直接考查……",
   "selected": ["C01", "C05"],
   "context_insufficient": false,
-  "need_expand_recall": false
+  "need_expand_recall": false,
+  "reason": "当前设问直接考查……"
 }}
 不要输出Markdown或JSON之外的内容。"""
     return prompt, code_map
