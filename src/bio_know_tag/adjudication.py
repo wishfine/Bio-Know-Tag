@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8-reject-wrong-labels"
+PROMPT_VERSION = "candidate-adjudication-v8-generalized-reject-wrong-labels"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -119,20 +119,12 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 
 选择规则：
 6. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
-7. 合理多标可以保留，但每一个Label都必须独立通过全部五道门槛；不得因已有一个正确Label就顺带加入相关Label。
+7. 合理多标可以保留，但每一个Label都必须独立通过全部五道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
 8. 若候选表面相关、甚至一度想选，但在反证复核中因定义、维度、distinctions或必要性失败，将其放入rejected_risky，不得留在selected。rejected_risky最多3个，仅用于审计。
 9. 题目有明确生物考点，但没有任何候选能通过五道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
 10. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
 11. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
 12. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
-
-必须拒绝的典型错标：
-- 施肥过多导致渗透失水 ≠ 观察植物细胞质壁分离实验。
-- 两基因的三种表型用于推断连锁 ≠ 基因分离定律或自由组合定律。
-- 小分子跨膜不等于胞吞胞吐；胞吞胞吐只用于大分子或颗粒物。
-- 载体蛋白转运不等于蛋白质变性、盐析或泛化的蛋白质功能。
-- 固定化脂酶的制备与测定 ≠ 分离尿素分解菌。
-- “综合”“应用”“热点”“方法”不得作兜底Label。
 
 只能返回C01等短代码，不能抄写长label_id。
 
@@ -144,10 +136,10 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 
 只输出一个JSON对象：
 {{
-  "selected": ["C01", "C05"],
   "rejected_risky": ["C03"],
-  "need_expand_recall": false,
-  "context_insufficient": false
+  "selected": ["C01", "C05"],
+  "context_insufficient": false,
+  "need_expand_recall": false
 }}
 不要输出Markdown或JSON之外的内容。"""
     return prompt, code_map
@@ -200,10 +192,10 @@ def validate_adjudication_result(
             "need_expand_recall must be true when only rejected_risky candidates remain"
         )
     return {
-        "selected": normalized,
         "rejected_risky": rejected_risky,
-        "need_expand_recall": value["need_expand_recall"],
+        "selected": normalized,
         "context_insufficient": value["context_insufficient"],
+        "need_expand_recall": value["need_expand_recall"],
         "none_of_candidates": not bool(normalized),
     }
 

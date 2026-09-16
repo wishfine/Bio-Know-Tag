@@ -103,15 +103,21 @@ def test_v8_prompt_uses_asymmetric_loss_and_adversarial_self_check():
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8-reject-wrong-labels"
+    assert PROMPT_VERSION == "candidate-adjudication-v8-generalized-reject-wrong-labels"
     assert "错标的代价远高于漏标" in prompt
     assert "五道硬门槛" in prompt
     assert "反证复核" in prompt
     assert "只要任意一道不能确定通过" in prompt
-    assert "小分子跨膜不等于胞吞胞吐" in prompt
-    assert "载体蛋白转运不等于蛋白质变性" in prompt
-    assert '"selected": ["C01", "C05"]' in prompt
+    assert "不得因为研究对象、题干关键词或所属章节相同" in prompt
+    assert "施肥过多" not in prompt
+    assert "小分子跨膜" not in prompt
+    assert "固定化脂酶" not in prompt
     assert '"rejected_risky": ["C03"]' in prompt
+    assert '"selected": ["C01", "C05"]' in prompt
+    schema = prompt.split("只输出一个JSON对象：", 1)[1]
+    assert schema.index('"rejected_risky"') < schema.index('"selected"')
+    assert schema.index('"selected"') < schema.index('"context_insufficient"')
+    assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert "evidence" not in prompt
 
 
