@@ -1558,3 +1558,33 @@ printf 'COVERAGE_RUN=%s PID=%s\n' "$COVERAGE_RUN" "$PID"
 3. 名称/释义明确为综合或整合的Label必须满足其多方面联动要求。
 
 v3 Prompt版本为`label-definition-coverage-v3-boundary-calibrated`，必须使用新run目录与同一批smoke题复测，再决定是否启动全量。
+
+### 26.5 Mentor-compatible同Label批处理主实验
+
+为与高中历史释义覆盖实验保持可比较口径，正式主实验采用mentor-compatible批处理实现：同一个Label的释义只发送一次，每批最多40题、题目正文总计不超过55000字符；DS只输出`task_id/question_id/match/relevance_score`，不输出理由或差异类型；程序强制以0.70重新计算match。V3单题版保留为小规模诊断工具，不作为19.8万任务的主运行器。
+
+该模式显式设置`chat_template_kwargs.enable_thinking=false`，使用非流式响应，默认8并发、600秒超时、3次重试。约198383个题目-Label对将由约5000至10000个批请求完成，实际批次数取决于55000字符预算。
+
+```bash
+COVERAGE_SAMPLE_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_SAMPLE_RUN)"
+SMOKE_INPUT="$COVERAGE_SAMPLE_RUN/smoke-20-labels.jsonl"
+MENTOR_SMOKE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-coverage-mentor-smoke20"
+mkdir -p "$MENTOR_SMOKE_RUN"
+
+PYTHONPATH=src python scripts/run_definition_coverage_batches.py \
+  --tasks "$SMOKE_INPUT" \
+  --labels configs/labels.jsonl \
+  --run-dir "$MENTOR_SMOKE_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 8 \
+  --max-batch-size 40 \
+  --char-budget 55000 \
+  --max-tokens 7000 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0
+```
+
+确认`report.json`中`input=processed=success=20`、`error=pending=0`、Prompt版本为`label-definition-coverage-mentor-batch-v1`后，再用`boundary_samples.jsonl`启动全量。全量必须新建目录并后台运行；失败批次保留在`evidence.jsonl`，使用完全相同命令和run目录即可只续跑未成功任务。

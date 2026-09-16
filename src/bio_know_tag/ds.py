@@ -77,6 +77,7 @@ class DSClient:
         retries: int = 3,
         retry_delay: float = 0.25,
         request_interval: float = 0.0,
+        enable_thinking: bool | None = None,
     ) -> None:
         self.endpoints = [endpoint.rstrip("/") for endpoint in endpoints if endpoint]
         if not self.endpoints:
@@ -90,6 +91,7 @@ class DSClient:
         self.retries = retries
         self.retry_delay = retry_delay
         self.request_interval = request_interval
+        self.enable_thinking = enable_thinking
         self._next_endpoint = 0
         self._endpoint_lock = threading.Lock()
         self._request_slot_lock = threading.Lock()
@@ -119,6 +121,10 @@ class DSClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
+        if self.enable_thinking is not None:
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self.enable_thinking
+            }
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         started = time.monotonic()
         last_error: Exception | None = None

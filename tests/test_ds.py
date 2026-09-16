@@ -200,6 +200,38 @@ def test_ds_client_failure_preserves_all_retry_diagnostics(monkeypatch):
     assert error.latency_seconds >= 0
 
 
+def test_ds_client_can_explicitly_disable_thinking(monkeypatch):
+    captured = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps(
+                {"choices": [{"message": {"content": '{"ok":true}'}}]}
+            ).encode()
+
+    def fake_urlopen(request, timeout):
+        captured.update(json.loads(request.data))
+        return Response()
+
+    monkeypatch.setattr("bio_know_tag.ds.urlopen", fake_urlopen)
+    client = DSClient(
+        ["http://example.test/v1/chat/completions"],
+        "model",
+        retries=1,
+        enable_thinking=False,
+    )
+
+    client.chat([{"role": "user", "content": "x"}])
+
+    assert captured["chat_template_kwargs"] == {"enable_thinking": False}
+
+
 def test_ds_client_spaces_concurrent_http_attempts():
     request_times = []
     lock = threading.Lock()
