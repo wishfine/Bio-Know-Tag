@@ -1588,3 +1588,22 @@ PYTHONPATH=src python scripts/run_definition_coverage_batches.py \
 ```
 
 确认`report.json`中`input=processed=success=20`、`error=pending=0`、Prompt版本为`label-definition-coverage-mentor-batch-v1`后，再用`boundary_samples.jsonl`启动全量。全量必须新建目录并后台运行；失败批次保留在`evidence.jsonl`，使用完全相同命令和run目录即可只续跑未成功任务。
+
+运行期间可以对追加中的`results.jsonl`建立只读快照并生成中期报告。先复制结果，避免分析时读到正在写入的最后一行；分析脚本即使遇到半行也会忽略并报告。中期分档只作筛查，未完成Label不下最终结论，且正样本实验不能单独判断释义偏宽。
+
+```bash
+COVERAGE_FULL_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_MENTOR_FULL_RUN)"
+COVERAGE_SAMPLE_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_SAMPLE_RUN)"
+SNAPSHOT_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-coverage-snapshot"
+mkdir -p "$SNAPSHOT_RUN"
+cp "$COVERAGE_FULL_RUN/results.jsonl" "$SNAPSHOT_RUN/results.snapshot.jsonl"
+
+PYTHONPATH=src python scripts/analyze_definition_coverage_snapshot.py \
+  --tasks "$COVERAGE_SAMPLE_RUN/boundary_samples.jsonl" \
+  --results "$SNAPSHOT_RUN/results.snapshot.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$SNAPSHOT_RUN/analysis" \
+  --samples-per-band 3
+```
+
+输出包括`analysis/snapshot_report.json`、`snapshot_report.md`、`per_label.jsonl`和`review_samples.jsonl`。`per_label.jsonl`中的等级为中期筛查等级，并明确把“偏宽”标为尚未测试；需要硬负样本实验后才能判定。
