@@ -163,6 +163,14 @@ def validate_adjudication_result(
     for field in required:
         if field not in value:
             raise ValueError(f"missing {field}")
+    for field in (
+        "need_expand_recall",
+        "context_insufficient",
+    ):
+        if not isinstance(value[field], bool):
+            raise ValueError(f"{field} must be boolean")
+    unknown_codes: list[str] = []
+
     def normalize_codes(field: str) -> list[str]:
         values = value[field]
         if not isinstance(values, list):
@@ -174,6 +182,10 @@ def validate_adjudication_result(
                 raise ValueError(f"{field} items must be short codes")
             code = item.strip()
             if code not in known_codes:
+                if value["need_expand_recall"]:
+                    if code and code not in unknown_codes:
+                        unknown_codes.append(code)
+                    continue
                 raise ValueError(f"unknown {field} code: {code}")
             if code not in seen:
                 normalized_values.append(code)
@@ -187,15 +199,10 @@ def validate_adjudication_result(
     if len(reason) > 1000:
         raise ValueError("reason is too long")
     normalized = normalize_codes("selected")
-    for field in (
-        "need_expand_recall",
-        "context_insufficient",
-    ):
-        if not isinstance(value[field], bool):
-            raise ValueError(f"{field} must be boolean")
     return {
         "reason": reason,
         "selected": normalized,
+        "unknown_selected_codes_dropped": unknown_codes,
         "context_insufficient": value["context_insufficient"],
         "need_expand_recall": value["need_expand_recall"],
         "none_of_candidates": not bool(normalized),
@@ -427,6 +434,8 @@ def run_adjudication(
     need_expand = 0
     none_count = 0
     context_insufficient_count = 0
+    unknown_selected_codes_dropped_count = 0
+    questions_with_unknown_selected_codes = 0
     usable_for_training_count = 0
     training_filter_reasons: Counter[str] = Counter()
     with (
@@ -475,6 +484,9 @@ def run_adjudication(
             need_expand += int(parsed["need_expand_recall"])
             none_count += int(parsed["none_of_candidates"])
             context_insufficient_count += int(parsed["context_insufficient"])
+            dropped_unknown_codes = parsed.get("unknown_selected_codes_dropped", [])
+            unknown_selected_codes_dropped_count += len(dropped_unknown_codes)
+            questions_with_unknown_selected_codes += int(bool(dropped_unknown_codes))
             needs_review = bool(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
@@ -497,6 +509,9 @@ def run_adjudication(
                 "unit_type": unit.get("unit_type", ""),
                 "reason": parsed["reason"],
                 "selected_labels": selected_labels,
+                "unknown_selected_codes_dropped": parsed.get(
+                    "unknown_selected_codes_dropped", []
+                ),
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
                 "context_insufficient": parsed["context_insufficient"],
@@ -646,6 +661,8 @@ def run_adjudication(
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "context_insufficient": context_insufficient_count,
+        "unknown_selected_codes_dropped": unknown_selected_codes_dropped_count,
+        "questions_with_unknown_selected_codes": questions_with_unknown_selected_codes,
         "usable_for_training": usable_for_training_count,
         "filtered_from_training": success - usable_for_training_count,
         "training_filter_reasons": dict(sorted(training_filter_reasons.items())),

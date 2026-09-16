@@ -231,6 +231,35 @@ def test_validate_adjudication_requires_nonempty_string_reason(reason):
         )
 
 
+def test_validate_adjudication_drops_unknown_answer_code_when_expanding_recall():
+    result = validate_adjudication_result(
+        {
+            "selected": ["D09"],
+            "context_insufficient": False,
+            "need_expand_recall": True,
+            "reason": "正确知识点不在候选中，需要扩召。",
+        },
+        {"C01", "C02"},
+    )
+
+    assert result["selected"] == []
+    assert result["none_of_candidates"] is True
+    assert result["unknown_selected_codes_dropped"] == ["D09"]
+
+
+def test_validate_adjudication_rejects_unknown_code_without_expansion():
+    with pytest.raises(ValueError, match="unknown selected code"):
+        validate_adjudication_result(
+            {
+                "selected": ["D09"],
+                "context_insufficient": False,
+                "need_expand_recall": False,
+                "reason": "选择D09。",
+            },
+            {"C01", "C02"},
+        )
+
+
 @pytest.mark.parametrize(
     ("selected", "expand", "context", "valid"),
     [
@@ -371,6 +400,8 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert "output_normalization_counts" not in report
     assert report["need_expand_recall"] == 0
     assert report["context_insufficient"] == 0
+    assert report["unknown_selected_codes_dropped"] == 0
+    assert report["questions_with_unknown_selected_codes"] == 0
     assert report["usable_for_training"] == 1
     assert report["filtered_from_training"] == 0
     assert report["token_usage"]["requests_with_usage"] == 1
