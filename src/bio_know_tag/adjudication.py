@@ -182,11 +182,9 @@ def validate_adjudication_result(
                 raise ValueError(f"{field} items must be short codes")
             code = item.strip()
             if code not in known_codes:
-                if value["need_expand_recall"]:
-                    if code and code not in unknown_codes:
-                        unknown_codes.append(code)
-                    continue
-                raise ValueError(f"unknown {field} code: {code}")
+                if code and code not in unknown_codes:
+                    unknown_codes.append(code)
+                continue
             if code not in seen:
                 normalized_values.append(code)
                 seen.add(code)
@@ -204,7 +202,7 @@ def validate_adjudication_result(
         "selected": normalized,
         "unknown_selected_codes_dropped": unknown_codes,
         "context_insufficient": value["context_insufficient"],
-        "need_expand_recall": value["need_expand_recall"],
+        "need_expand_recall": value["need_expand_recall"] or bool(unknown_codes),
         "none_of_candidates": not bool(normalized),
     }
 

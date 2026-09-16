@@ -247,17 +247,21 @@ def test_validate_adjudication_drops_unknown_answer_code_when_expanding_recall()
     assert result["unknown_selected_codes_dropped"] == ["D09"]
 
 
-def test_validate_adjudication_rejects_unknown_code_without_expansion():
-    with pytest.raises(ValueError, match="unknown selected code"):
-        validate_adjudication_result(
-            {
-                "selected": ["D09"],
-                "context_insufficient": False,
-                "need_expand_recall": False,
-                "reason": "选择D09。",
-            },
-            {"C01", "C02"},
-        )
+def test_validate_adjudication_safely_drops_unknown_code_and_forces_expansion():
+    result = validate_adjudication_result(
+        {
+            "selected": ["D09"],
+            "context_insufficient": False,
+            "need_expand_recall": False,
+            "reason": "选择D09。",
+        },
+        {"C01", "C02"},
+    )
+
+    assert result["selected"] == []
+    assert result["unknown_selected_codes_dropped"] == ["D09"]
+    assert result["need_expand_recall"] is True
+    assert result["none_of_candidates"] is True
 
 
 @pytest.mark.parametrize(
