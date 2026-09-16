@@ -59,6 +59,18 @@ def _score_band(score: float) -> str:
     return "weak_related"
 
 
+def _sample_tier(planned: int) -> str:
+    if planned < 30:
+        return "LT1_EXTREME_1_29"
+    if planned < 100:
+        return "LT2_SEVERE_30_99"
+    if planned < 300:
+        return "LT3_MODERATE_100_299"
+    if planned < 500:
+        return "ADEQUATE_300_499"
+    return "CAPPED_500"
+
+
 def _metric_row(
     label_id: str,
     label_name: str,
@@ -100,6 +112,8 @@ def _metric_row(
         issue_flags.append("incomplete")
     if planned < 50:
         issue_flags.append("low_sample")
+    if planned < 300:
+        issue_flags.append("long_tail_under_300")
     if completed >= 30 and match_rate is not None and match_rate < 0.55:
         issue_flags.append("low_positive_coverage")
     if completed >= 30 and zero_rate is not None and zero_rate >= 0.30:
@@ -126,10 +140,11 @@ def _metric_row(
         and gray_rate <= 0.10
         and "parent_union_suspected" not in issue_flags
     )
-    if completed < planned:
+    sample_tier = _sample_tier(planned)
+    if completed == planned and planned < 300:
+        grade = "U_LONG_TAIL_REVIEW"
+    elif completed < planned:
         grade = "SNAPSHOT_INCOMPLETE"
-    elif planned < 50:
-        grade = "U_INSUFFICIENT_EVIDENCE"
     elif "parent_union_suspected" in issue_flags or "high_zero_rate" in issue_flags:
         grade = "D_NON_DEFINITION_ISSUE_SUSPECTED"
     elif "low_positive_coverage" in issue_flags or "boundary_gray" in issue_flags:
@@ -141,6 +156,7 @@ def _metric_row(
     return {
         "label_id": label_id,
         "label_name": label_name,
+        "sample_tier": sample_tier,
         "planned": planned,
         "completed": completed,
         "completion_rate": completion_rate,
@@ -200,6 +216,11 @@ def _markdown_report(report: dict[str, Any], per_label: list[dict[str, Any]]) ->
     lines.extend(
         [
             "",
+            "## 样本量与长尾",
+            "",
+            f"- 少于300道独立题的长尾Label：{report['long_tail_labels_under_300']}个。",
+            "- LT1：1–29题；LT2：30–99题；LT3：100–299题。长尾Label不做全自动释义结论，必须重点人工复核。",
+            "",
             "## 当前低匹配率Label（仅展示已有结果）",
             "",
             "| Label | 完成/计划 | 匹配率 | 0分率 | 灰度率 |",
@@ -241,7 +262,7 @@ def _markdown_report(report: dict[str, Any], per_label: list[dict[str, Any]]) ->
             "",
             "- `A_STABLE_CANDIDATE`只是正样本覆盖稳定候选，仍需硬负样本验证是否偏宽。",
             "- 低匹配率可能来自释义偏窄、旧标签错误、父题污染或数据问题，必须看抽样证据后定性。",
-            "- 计划样本少于50的Label标为证据不足，不自动修改释义。",
+            "- 计划样本少于300的Label统一标记为长尾，按LT1/LT2/LT3分级重点复核，不自动修改释义。",
             "",
         ]
     )
@@ -288,6 +309,12 @@ def analyze_coverage_snapshot(
     per_label.sort(key=lambda row: row["label_id"])
     with (output_dir / "per_label.jsonl").open("w", encoding="utf-8") as output:
         for row in per_label:
+            output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    long_tail_rows = [row for row in per_label if row["planned"] < 300]
+    with (output_dir / "long_tail_labels.jsonl").open(
+        "w", encoding="utf-8"
+    ) as output:
+        for row in sorted(long_tail_rows, key=lambda item: (item["planned"], item["label_name"])):
             output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
 
     review_buckets: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
@@ -356,6 +383,10 @@ def analyze_coverage_snapshot(
         "preliminary_grade_counts": dict(
             sorted(Counter(row["preliminary_grade"] for row in per_label).items())
         ),
+        "long_tail_labels_under_300": len(long_tail_rows),
+        "sample_tier_counts": dict(
+            sorted(Counter(row["sample_tier"] for row in per_label).items())
+        ),
         "issue_flag_counts": dict(
             sorted(Counter(flag for row in per_label for flag in row["issue_flags"]).items())
         ),
@@ -370,4 +401,3 @@ def analyze_coverage_snapshot(
         _markdown_report(report, per_label), encoding="utf-8"
     )
     return report
-

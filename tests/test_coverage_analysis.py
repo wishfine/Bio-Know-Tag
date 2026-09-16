@@ -58,7 +58,13 @@ def test_analyze_partial_snapshot_tracks_completion_and_issue_screens(tmp_path: 
     assert per_label["L1"]["match_rate"] == 0.5
     assert "incomplete" in per_label["L1"]["issue_flags"]
     assert "low_sample" in per_label["L2"]["issue_flags"]
+    assert "long_tail_under_300" in per_label["L2"]["issue_flags"]
+    assert per_label["L2"]["sample_tier"] == "LT1_EXTREME_1_29"
+    assert per_label["L2"]["preliminary_grade"] == "U_LONG_TAIL_REVIEW"
+    long_tail = list(map(json.loads, (output / "long_tail_labels.jsonl").open()))
+    assert {row["label_id"] for row in long_tail} == {"L1", "L2"}
+    assert report["long_tail_labels_under_300"] == 2
+    assert report["sample_tier_counts"] == {"LT1_EXTREME_1_29": 2}
     review_rows = list(map(json.loads, (output / "review_samples.jsonl").open()))
     assert {row["score_band"] for row in review_rows} == {"high_match", "zero", "gray"}
     assert (output / "snapshot_report.md").exists()
-
