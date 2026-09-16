@@ -64,6 +64,44 @@ def test_build_boundary_sample_uses_only_current_label_ids(tmp_path: Path):
     assert report["obsolete_legacy_assignments_ignored"] == 1
 
 
+def test_build_boundary_sample_excludes_text_ineligible_and_review_units(tmp_path: Path):
+    units = tmp_path / "units.jsonl"
+    contexts = tmp_path / "image_context.jsonl"
+    labels = tmp_path / "labels.jsonl"
+    output = tmp_path / "sample"
+    _write_jsonl(labels, _labels())
+    _write_jsonl(
+        units,
+        [
+            {"question_id": "keep", "stem": "DNA复制", "legacy_knw_ids": ["L1"]},
+            {"question_id": "empty", "stem": "", "legacy_knw_ids": ["L1"]},
+            {"question_id": "review", "stem": "材料", "legacy_knw_ids": ["L1"]},
+        ],
+    )
+    _write_jsonl(
+        contexts,
+        [
+            {"question_id": "keep", "eligible_for_text_labeling": True, "needs_content_review": False},
+            {"question_id": "empty", "eligible_for_text_labeling": False, "needs_content_review": True},
+            {"question_id": "review", "eligible_for_text_labeling": True, "needs_content_review": True},
+        ],
+    )
+
+    report = build_boundary_sample(
+        units,
+        labels,
+        output,
+        positive_per_label=5,
+        image_context_path=contexts,
+        exclude_content_review=True,
+    )
+
+    rows = [json.loads(line) for line in (output / "boundary_samples.jsonl").read_text().splitlines()]
+    assert [row["question_id"] for row in rows] == ["keep"]
+    assert report["text_ineligible_units_skipped"] == 1
+    assert report["content_review_units_skipped"] == 1
+
+
 def test_boundary_prompt_contains_teacher_fields_and_no_legacy_ids():
     sample = {
         "question_id": "q1",

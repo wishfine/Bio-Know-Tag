@@ -20,6 +20,8 @@ def main() -> int:
     parser.add_argument("--negative-per-label", type=int, default=0)
     parser.add_argument("--seed", default="label-boundary-v1")
     parser.add_argument("--unit-type", action="append", dest="unit_types")
+    parser.add_argument("--image-context", type=Path)
+    parser.add_argument("--exclude-content-review", action="store_true")
     args = parser.parse_args()
     run_dir = args.run_dir or Path("runtime") / datetime.now().strftime("%Y%m%d-%H%M%S-label-boundary-sample")
     report = build_boundary_sample(
@@ -30,6 +32,8 @@ def main() -> int:
         negative_per_label=args.negative_per_label,
         seed=args.seed,
         unit_types=set(args.unit_types) if args.unit_types else None,
+        image_context_path=args.image_context,
+        exclude_content_review=args.exclude_content_review,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0

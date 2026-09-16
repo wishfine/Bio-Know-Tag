@@ -1450,7 +1450,35 @@ PYTHONPATH=src python scripts/build_label_units.py \
 printf '%s\n' "$UPDATED_UNIT_RUN" > runtime/LATEST_UPDATED_LABEL_UNITS_RUN
 ```
 
-### 26.3 抽样与DS评分
+### 26.3 关联题干/解析图片URL并审计文本可用性
+
+图片映射文件约805MB，顶层为`question_id -> {stemImageUrl, analysisImageUrl}`。审计脚本流式读取该文件，不将整个JSON载入内存，也不下载图片或发送给文本版DS。输出与`label_units.jsonl`同序的sidecar，以及确定排除和待复核清单。
+
+```bash
+IMAGE_MAP='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/题干-解析图片url/four_subject_image_urls.json'
+IMAGE_AUDIT_RUN="runtime/$(date +%Y%m%d-%H%M%S)-image-context-audit"
+mkdir -p "$IMAGE_AUDIT_RUN"
+printf '%s\n' "$IMAGE_AUDIT_RUN" > runtime/LATEST_IMAGE_CONTEXT_AUDIT_RUN
+
+nohup env PYTHONPATH=src python scripts/audit_label_unit_images.py \
+  --units "$UPDATED_UNIT_RUN/label_units.jsonl" \
+  --image-map "$IMAGE_MAP" \
+  --run-dir "$IMAGE_AUDIT_RUN" \
+  > "$IMAGE_AUDIT_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$IMAGE_AUDIT_RUN/pid"
+printf 'IMAGE_AUDIT_RUN=%s PID=%s\n' "$IMAGE_AUDIT_RUN" "$PID"
+```
+
+输出含义：
+
+- `image_context.jsonl`：每个打标单元的当前题/父题题干图、解析图URL及文本可用状态；
+- `excluded_units.jsonl`：当前设问缺失或题干上下文完全为空，不交给文本DS；
+- `review_units.jsonl`：图片中才有题干，或只有一段stem但无选项、答案、解析，需要后续OCR/多模态或抽查；
+- `report.json`：各状态数量。图片存在但未给文本DS，不再误记为原始图片丢失。
+
+### 26.4 抽样与DS评分
 
 每个Label最多抽500个仍带该当前Label历史ID的实际打标单元（独立题、小题、缺父题小题）。历史ID只是找题用的弱监督，不是金标。DS只看到Label名称、老师四字段释义和题目，不看到`knw_ids`。
 
@@ -1461,6 +1489,8 @@ printf '%s\n' "$COVERAGE_SAMPLE_RUN" > runtime/LATEST_DEFINITION_COVERAGE_SAMPLE
 
 PYTHONPATH=src python scripts/build_label_boundary_sample.py \
   --units "$UPDATED_UNIT_RUN/label_units.jsonl" \
+  --image-context "$IMAGE_AUDIT_RUN/image_context.jsonl" \
+  --exclude-content-review \
   --labels configs/labels.jsonl \
   --run-dir "$COVERAGE_SAMPLE_RUN" \
   --positive-per-label 500 \

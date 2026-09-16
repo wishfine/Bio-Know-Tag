@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import itertools
 import json
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -107,6 +108,8 @@ def build_boundary_sample(
     negative_per_label: int = 0,
     seed: str = "label-boundary-v1",
     unit_types: set[str] | None = None,
+    image_context_path: str | Path | None = None,
+    exclude_content_review: bool = False,
 ) -> dict[str, Any]:
     """Sample legacy positives and optional sibling-label hard negatives per Label."""
     if positive_per_label < 1 or negative_per_label < 0:
@@ -125,8 +128,27 @@ def build_boundary_sample(
     positives: dict[str, list[tuple[int, str, dict[str, Any]]]] = defaultdict(list)
     negatives: dict[str, list[tuple[int, str, dict[str, Any]]]] = defaultdict(list)
     scanned = obsolete_assignments = 0
-    for unit in _read_jsonl(units_path):
+    text_ineligible_skipped = content_review_skipped = 0
+    if image_context_path is None:
+        unit_rows = ((unit, None) for unit in _read_jsonl(units_path))
+    else:
+        unit_rows = itertools.zip_longest(
+            _read_jsonl(units_path), _read_jsonl(image_context_path)
+        )
+    for unit, context in unit_rows:
+        if unit is None or (image_context_path is not None and context is None):
+            raise ValueError("units and image context must contain the same number of rows")
         scanned += 1
+        if context is not None:
+            question_id = str(unit.get("question_id") or "")
+            if question_id != str(context.get("question_id") or ""):
+                raise ValueError(f"units/image-context order mismatch at {question_id}")
+            if not bool(context.get("eligible_for_text_labeling")):
+                text_ineligible_skipped += 1
+                continue
+            if exclude_content_review and bool(context.get("needs_content_review")):
+                content_review_skipped += 1
+                continue
         if unit_types and str(unit.get("unit_type") or "") not in unit_types:
             continue
         valid, obsolete = valid_legacy_targets(unit, label_ids)
@@ -190,6 +212,10 @@ def build_boundary_sample(
         "labels_with_legacy_positive": labels_with_positive,
         "labels_without_legacy_positive": len(labels) - labels_with_positive,
         "obsolete_legacy_assignments_ignored": obsolete_assignments,
+        "image_context_path": str(image_context_path) if image_context_path else None,
+        "text_ineligible_units_skipped": text_ineligible_skipped,
+        "content_review_units_skipped": content_review_skipped,
+        "exclude_content_review": exclude_content_review,
         "seed": seed,
         "unit_types": sorted(unit_types) if unit_types else ["all"],
         "ground_truth_warning": "Legacy positives and sibling negatives are weak supervision, not verified gold labels.",
