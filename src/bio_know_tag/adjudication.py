@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v7-balanced-precision"
+PROMPT_VERSION = "candidate-adjudication-v8-reject-wrong-labels"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -84,6 +84,7 @@ def build_adjudication_prompt(
                 "label_path": format_label_path(label.get("label_path")),
                 "definition": label.get("definition", ""),
                 "core_concepts": label.get("core_concepts", ""),
+                "common_assessments": label.get("common_assessments", ""),
                 "distinctions": label.get("distinctions", ""),
             }
         )
@@ -102,21 +103,38 @@ def build_adjudication_prompt(
             (unit.get("flags") or {}).get("image_context_missing")
         ),
     }
-    prompt = f"""你是严谨的高中生物知识点判标器。目标是选出当前题目实际考查的所有合理Label；合理多标可以保留，但不能用相近而边界不同的Label替代。
+    prompt = f"""你是严谨的高中生物知识点判标器。本任务采用非对称损失：错标的代价远高于漏标。可以少选、置空或扩召，绝不得把只是相关、更宽泛或边界不同的Label写入selected。
 
-判标规则：
-1. 以老师给出的definition、core_concepts和distinctions为唯一Label边界，不自行扩张Label含义。
-2. 只判断当前小题。parent_stem仅提供理解当前小题所需的公共语境，父题其他内容和兄弟小题知识点不选；大题Label之后由各小题Label并集，再通过单独的父题步骤补充公共材料额外考查的Label。
-3. 当前设问、每个选项的正误判断、答案或解析明确调用某Label时，该Label都可选。材料背景、工具名称、弱相关联想不选。
-4. 允许同时选择多个合理Label，不要强行压缩为“最小集合”。上下位或语义重叠的Label只要各自释义都直接覆盖题目考点，可以同时选择。
-5. 选择前先校验“考查维度”。原理、实验、应用、结论和发展史属于不同维度；同一对象但考查维度不同，不能互相替代。边界匹配优先于粒度具体。
-6. distinctions中的区分是硬边界。题目若落在distinctions明确区分的另一侧，不得选择该Label。
-7. 典型边界示例：考“渗透失水原理”不等于考“观察质壁分离实验”；考“细胞是生命活动基本单位”不等于考“细胞学说发展史”；考“水跨膜运输”不等于考“水的存在形式与转化”。
-8. “综合”“应用”“热点”“方法”等Label只有在题目实际考查该维度且符合老师释义时才选，不得用作兜底。
-9. 允许selected为空。若题目有明确高中生物考点，但候选只有相近而不准确的Label，不要硬选，设置need_expand_recall=true。若已选中至少一个准确Label，仅漏掉次要或不确定知识点时保持false。非生物题或无有效设问时也保持false。
-10. 仅当缺图或缺父题材料使你连一个可靠Label都无法确定时，才设置context_insufficient=true。只要stem、options、answer_text或analysis已足够确定至少一个Label，就保持false。
-11. 在内部先列出当前题目的明确考点，再逐个核对候选的definition、考查维度和distinctions；不要输出这个思考过程。
-12. 只能返回C01等短代码，不能抄写长label_id。
+任务流程（仅内部执行，不输出理由）：
+A. 先用当前设问、选项判断、答案和解析列出“完成本题必须调用的知识”。
+B. 对每个拟选Label逐项通过下面五道硬门槛。
+C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该被选”的证据。只要任意一道不能确定通过，就从selected删除。
+
+五道硬门槛（必须全部通过）：
+1. 直接考查：正确解答当前设问确实需要该Label；仅出现于材料、父题背景、工具名或弱联想不通过。错误选项只有在判断其错误必须调用该知识时才算直接考查。
+2. 精确定义：题目考点完整落入definition和core_concepts，不得因共享一个名词就扩张Label。
+3. 考查维度：原理、现象、实验操作、实验设计、应用、方法、结论、发展史是不同维度，不能互相替代。common_assessments可帮助判定维度，但不能单独证明应入选。
+4. 边界否决：distinctions是硬否决条件；只要题目落在它排除的一侧，立即拒绝。
+5. 必要性反问：如果学生完全不会该Label，仍能依靠其他知识完整解决当前设问，则该Label不是必要考点，拒绝。
+
+选择规则：
+6. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
+7. 合理多标可以保留，但每一个Label都必须独立通过全部五道门槛；不得因已有一个正确Label就顺带加入相关Label。
+8. 若候选表面相关、甚至一度想选，但在反证复核中因定义、维度、distinctions或必要性失败，将其放入rejected_risky，不得留在selected。rejected_risky最多3个，仅用于审计。
+9. 题目有明确生物考点，但没有任何候选能通过五道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
+10. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
+11. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
+12. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
+
+必须拒绝的典型错标：
+- 施肥过多导致渗透失水 ≠ 观察植物细胞质壁分离实验。
+- 两基因的三种表型用于推断连锁 ≠ 基因分离定律或自由组合定律。
+- 小分子跨膜不等于胞吞胞吐；胞吞胞吐只用于大分子或颗粒物。
+- 载体蛋白转运不等于蛋白质变性、盐析或泛化的蛋白质功能。
+- 固定化脂酶的制备与测定 ≠ 分离尿素分解菌。
+- “综合”“应用”“热点”“方法”不得作兜底Label。
+
+只能返回C01等短代码，不能抄写长label_id。
 
 题目：
 {json.dumps(question, ensure_ascii=False)}
@@ -127,6 +145,7 @@ def build_adjudication_prompt(
 只输出一个JSON对象：
 {{
   "selected": ["C01", "C05"],
+  "rejected_risky": ["C03"],
   "need_expand_recall": false,
   "context_insufficient": false
 }}
@@ -140,34 +159,49 @@ def validate_adjudication_result(
 ) -> dict[str, Any]:
     required = (
         "selected",
+        "rejected_risky",
         "need_expand_recall",
         "context_insufficient",
     )
     for field in required:
         if field not in value:
             raise ValueError(f"missing {field}")
-    selected = value["selected"]
-    if not isinstance(selected, list):
-        raise ValueError("selected must be a list")
-    seen: set[str] = set()
-    normalized: list[str] = []
-    for item in selected:
-        if not isinstance(item, str):
-            raise ValueError("selected items must be short codes")
-        code = item.strip()
-        if code not in known_codes:
-            raise ValueError(f"unknown selected code: {code}")
-        if code not in seen:
-            normalized.append(code)
-            seen.add(code)
+    def normalize_codes(field: str) -> list[str]:
+        values = value[field]
+        if not isinstance(values, list):
+            raise ValueError(f"{field} must be a list")
+        seen: set[str] = set()
+        normalized_values: list[str] = []
+        for item in values:
+            if not isinstance(item, str):
+                raise ValueError(f"{field} items must be short codes")
+            code = item.strip()
+            if code not in known_codes:
+                raise ValueError(f"unknown {field} code: {code}")
+            if code not in seen:
+                normalized_values.append(code)
+                seen.add(code)
+        return normalized_values
+
+    normalized = normalize_codes("selected")
+    rejected_risky = normalize_codes("rejected_risky")
+    if len(rejected_risky) > 3:
+        raise ValueError("rejected_risky must contain at most 3 codes")
+    if set(normalized) & set(rejected_risky):
+        raise ValueError("selected and rejected_risky must be disjoint")
     for field in (
         "need_expand_recall",
         "context_insufficient",
     ):
         if not isinstance(value[field], bool):
             raise ValueError(f"{field} must be boolean")
+    if rejected_risky and not normalized and not value["need_expand_recall"]:
+        raise ValueError(
+            "need_expand_recall must be true when only rejected_risky candidates remain"
+        )
     return {
         "selected": normalized,
+        "rejected_risky": rejected_risky,
         "need_expand_recall": value["need_expand_recall"],
         "context_insufficient": value["context_insufficient"],
         "none_of_candidates": not bool(normalized),
@@ -399,6 +433,9 @@ def run_adjudication(
     need_expand = 0
     none_count = 0
     context_insufficient_count = 0
+    rejected_risky_count = 0
+    questions_with_rejected_risky = 0
+    rejected_risky_count_distribution: Counter[str] = Counter()
     usable_for_training_count = 0
     training_filter_reasons: Counter[str] = Counter()
     with (
@@ -442,6 +479,31 @@ def run_adjudication(
             selected_labels.sort(
                 key=lambda item: (item["candidate_rank"], item["label_id"])
             )
+            rejected_risky_labels = []
+            for code in parsed["rejected_risky"]:
+                label_id = code_map[code]
+                label = labels_by_id[label_id]
+                candidate = candidates_by_id[label_id]
+                rank = int(
+                    candidate.get("candidate_rank") or candidate.get("rank") or 0
+                )
+                rejected_risky_labels.append(
+                    {
+                        "label_id": label_id,
+                        "label_name": label.get("label_name", ""),
+                        "label_path": format_label_path(label.get("label_path")),
+                        "candidate_rank": rank,
+                        "sources": candidate.get("sources", []),
+                        "sparse_rank": candidate.get("sparse_rank"),
+                        "dense_rank": candidate.get("dense_rank"),
+                    }
+                )
+            rejected_risky_labels.sort(
+                key=lambda item: (item["candidate_rank"], item["label_id"])
+            )
+            rejected_risky_count += len(rejected_risky_labels)
+            questions_with_rejected_risky += int(bool(rejected_risky_labels))
+            rejected_risky_count_distribution[str(len(rejected_risky_labels))] += 1
             questions_using_tail += int(used_tail)
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
@@ -468,6 +530,7 @@ def run_adjudication(
                 "parent_id": unit.get("parent_id", question_id),
                 "unit_type": unit.get("unit_type", ""),
                 "selected_labels": selected_labels,
+                "rejected_risky_labels": rejected_risky_labels,
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
                 "context_insufficient": parsed["context_insufficient"],
@@ -617,6 +680,14 @@ def run_adjudication(
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "context_insufficient": context_insufficient_count,
+        "rejected_risky_count": rejected_risky_count,
+        "questions_with_rejected_risky": questions_with_rejected_risky,
+        "rejected_risky_count_distribution": dict(
+            sorted(
+                rejected_risky_count_distribution.items(),
+                key=lambda item: int(item[0]),
+            )
+        ),
         "usable_for_training": usable_for_training_count,
         "filtered_from_training": success - usable_for_training_count,
         "training_filter_reasons": dict(sorted(training_filter_reasons.items())),

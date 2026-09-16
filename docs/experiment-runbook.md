@@ -1166,3 +1166,53 @@ wc -l "$BOUNDARY_JUDGE_RUN/predictions.jsonl" "$BOUNDARY_JUDGE_RUN/per_label.jso
 ```
 
 `legacy_positive_true_rate`表示DS根据老师释义接受历史正例的比例。false项必须人工抽查：可能是释义边界过窄，也可能是旧ID错标，不能自动当成老师释义有问题。正例完成后，再用`--negative-per-label 3`抽同父级难负例，验证释义是否过宽。
+
+## 24. v8错标拒绝与反证复核
+
+v7恢复了覆盖，但300题复核仍发现“渗透失水→质壁分离实验”、“连锁→分离定律”、“小分子跨膜→胞吞胞吐”和“载体蛋白→蛋白质变性”等可污染训练集的错标。v8以错标代价远高于漏标为核心：
+
+- 候选必须同时通过直接考查、精确定义、考查维度、`distinctions`硬否决和必要性反问五道门槛。
+- 模型对暂定`selected`再做一次反证复核；任一门槛不确定就删除。
+- `rejected_risky`最多保留3个“一度想选但已被复核否决”的短代码，只用于审计，不进入训练Label。
+- 若候选只有相近替代项，必须空标并扩召；不强制产出。
+- Label Card增加`common_assessments`，用于识别原理/实验/应用等考查维度。
+
+为了只比较Prompt，v8仍先使用原300题和原Top25，不同时接入旧ID增强候选：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V8_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-reject-wrong"
+mkdir -p "$V8_RUN"
+printf '%s\n' "$V8_RUN" > runtime/LATEST_ADJUDICATION_V8_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V8_RUN" \
+  --endpoint 'http://172.22.0.35:9104/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 4 \
+  --timeout 300 \
+  --retries 10 \
+  --retry-delay 2 \
+  --request-interval 2 \
+  --max-tokens 128 \
+  > "$V8_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V8_RUN/pid"
+printf 'V8_RUN=%s PID=%s\n' "$V8_RUN" "$PID"
+```
+
+完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8-reject-wrong-labels`。精度验收优先级高于`usable_for_training`数量：
+
+1. 施肥烧苗不得选质壁分离实验；原Top25缺正确渗透Label时应空标+扩召。
+2. 两基因三种表型应选连锁，不得用分离/自由组合替代。
+3. 小分子跨膜不得选胞吞胞吐。
+4. ABA-Cl⁻载体题不得选蛋白质变性/泛化功能。
+5. 固定化脂酶题在无准确现行Label时不得选尿素分解菌。
+6. `rejected_risky_labels`必须与`selected_labels`分离；报告会统计`rejected_risky_count`和`questions_with_rejected_risky`。

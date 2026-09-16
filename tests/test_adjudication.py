@@ -63,12 +63,12 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert "标签一定义" in prompt
     assert "标签一核心" in prompt
     assert "标签一边界" in prompt
-    assert "标签一考查" not in prompt
+    assert "标签一考查" in prompt
     assert "知识点@模块@标签一" in prompt
     assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
     assert "合理多标可以保留" in prompt
-    assert "允许selected为空" in prompt
+    assert "可以少选、置空或扩召" in prompt
     assert "删除测试" not in prompt
     assert '"parent_context_missing": false' in prompt
     assert '"image_context_missing": false' in prompt
@@ -97,25 +97,29 @@ def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
     assert list(q1_first.values()) != list(q2.values())
 
 
-def test_v7_prompt_allows_reasonable_multilabel_without_cross_dimension_substitution():
+def test_v8_prompt_uses_asymmetric_loss_and_adversarial_self_check():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v7-balanced-precision"
-    assert "允许同时选择多个合理Label" in prompt
-    assert "同一对象但考查维度不同" in prompt
-    assert "原理、实验、应用、结论和发展史" in prompt
-    assert "边界匹配优先于粒度具体" in prompt
+    assert PROMPT_VERSION == "candidate-adjudication-v8-reject-wrong-labels"
+    assert "错标的代价远高于漏标" in prompt
+    assert "五道硬门槛" in prompt
+    assert "反证复核" in prompt
+    assert "只要任意一道不能确定通过" in prompt
+    assert "小分子跨膜不等于胞吞胞吐" in prompt
+    assert "载体蛋白转运不等于蛋白质变性" in prompt
     assert '"selected": ["C01", "C05"]' in prompt
+    assert '"rejected_risky": ["C03"]' in prompt
     assert "evidence" not in prompt
 
 
-def test_validate_v7_adjudication_accepts_only_short_code_list():
+def test_validate_v8_adjudication_separates_selected_and_rejected_risky():
     result = validate_adjudication_result(
         {
             "selected": ["C02", "C01", "C02"],
+            "rejected_risky": [],
             "need_expand_recall": False,
             "context_insufficient": False,
         },
@@ -123,11 +127,13 @@ def test_validate_v7_adjudication_accepts_only_short_code_list():
     )
 
     assert result["selected"] == ["C02", "C01"]
+    assert result["rejected_risky"] == []
     assert result["none_of_candidates"] is False
     with pytest.raises(ValueError, match="short codes"):
         validate_adjudication_result(
             {
                 "selected": [{"code": "C01", "evidence": "题干"}],
+                "rejected_risky": [],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -138,6 +144,7 @@ def test_validate_v7_adjudication_accepts_only_short_code_list():
 def test_validate_adjudication_derives_empty_state():
     valid = {
         "selected": ["C01"],
+        "rejected_risky": [],
         "need_expand_recall": False,
         "context_insufficient": False,
     }
@@ -149,6 +156,38 @@ def test_validate_adjudication_derives_empty_state():
         {"C01", "C02"},
     )
     assert empty["none_of_candidates"] is True
+
+
+def test_validate_v8_rejects_overlap_and_limits_diagnostic_codes():
+    base = {
+        "selected": ["C01"],
+        "rejected_risky": ["C02"],
+        "need_expand_recall": False,
+        "context_insufficient": False,
+    }
+    result = validate_adjudication_result(base, {"C01", "C02", "C03", "C04"})
+    assert result["rejected_risky"] == ["C02"]
+
+    with pytest.raises(ValueError, match="disjoint"):
+        validate_adjudication_result(
+            {**base, "rejected_risky": ["C01"]},
+            {"C01", "C02"},
+        )
+    with pytest.raises(ValueError, match="at most 3"):
+        validate_adjudication_result(
+            {**base, "rejected_risky": ["C01", "C02", "C03", "C04"]},
+            {"C01", "C02", "C03", "C04"},
+        )
+    with pytest.raises(ValueError, match="need_expand_recall"):
+        validate_adjudication_result(
+            {
+                **base,
+                "selected": [],
+                "rejected_risky": ["C02"],
+                "need_expand_recall": False,
+            },
+            {"C01", "C02"},
+        )
 
 
 @pytest.mark.parametrize(
@@ -178,6 +217,7 @@ def test_validate_adjudication_candidate_and_context_states(
 ):
     value = {
         "selected": selected,
+        "rejected_risky": [],
         "need_expand_recall": expand,
         "context_insufficient": context,
     }
@@ -206,6 +246,9 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     code_for_l23 = next(
         code for code, label_id in shuffled_code_map.items() if label_id == "L23"
     )
+    code_for_l22 = next(
+        code for code, label_id in shuffled_code_map.items() if label_id == "L22"
+    )
     candidates_path.write_text(
         json.dumps(
             {
@@ -230,6 +273,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
         content = json.dumps(
             {
                 "selected": [code_for_l23],
+                "rejected_risky": [code_for_l22],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -271,6 +315,8 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
     assert prediction["selected_labels"][0]["label_id"] == "L23"
     assert prediction["selected_labels"][0]["candidate_rank"] == 23
+    assert prediction["rejected_risky_labels"][0]["label_id"] == "L22"
+    assert prediction["rejected_risky_labels"][0]["candidate_rank"] == 22
     assert prediction["selected_labels"][0]["label_path"] == "知识点@模块@标签23"
     assert prediction["candidate_count"] == 25
     assert prediction["retrieval_version"] == "hybrid-v1-s18-d7-k25"
@@ -279,6 +325,8 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["max_selected_candidate_rank"] == 23
     assert report["selected_from_rank_21_25"] == 1
     assert report["questions_using_rank_21_25"] == 1
+    assert report["rejected_risky_count"] == 1
+    assert report["questions_with_rejected_risky"] == 1
     assert report["need_expand_recall"] == 0
     assert report["context_insufficient"] == 0
     assert report["usable_for_training"] == 1
@@ -335,6 +383,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
         content = json.dumps(
             {
                 "selected": ["C01"],
+                "rejected_risky": [],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -407,6 +456,7 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
         content = json.dumps(
             {
                 "selected": ["C01"],
+                "rejected_risky": [],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -480,6 +530,7 @@ def test_run_adjudication_filters_risky_training_rows(
         content = json.dumps(
             {
                 "selected": selected,
+                "rejected_risky": [],
                 "need_expand_recall": expand,
                 "context_insufficient": context,
             },

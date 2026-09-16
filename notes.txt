@@ -39,3 +39,9 @@ Bio-Know-Tag Pilot实验记录
 - Candidate augmentation: after validation, append at most five missing valid historical IDs as candidates; never inherit them as final labels.
 - Boundary validation: sample up to five standalone historical positives per current Label and ask DS for a strict boolean using the Label name plus the four teacher-authored definition fields. Optional sibling hard negatives test overly broad boundaries.
 - Outputs are JSONL sidecars plus reports; legacy agreement is explicitly treated as weak supervision rather than gold accuracy.
+
+2026-09-16 candidate adjudication v8
+- v7 completed 300/300 and increased usable rows from 251 to 286, but retained clear false-positive Labels in fertilizer/osmosis, linkage, membrane transport, and carrier-protein cases.
+- v8 makes false positives more costly than omissions, requires five independent hard gates, and performs an internal adversarial refutation pass over every provisional selection.
+- `rejected_risky` records up to three plausible-looking candidates removed by self-audit. These codes never enter training labels; when they are the only remaining candidates, the response must request recall expansion.
+- `common_assessments` is now included in each Label Card to make the assessed dimension explicit. On the fixed 300-question inputs, mean prompt characters are 18,768.6, 21.49% above v7; this is accepted for the precision-first experiment.
