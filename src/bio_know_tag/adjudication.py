@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8.1-risk-first-safe"
+PROMPT_VERSION = "candidate-adjudication-v8.2-selected-first-ablation"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -138,8 +138,8 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 
 只输出一个JSON对象：
 {{
-  "rejected_risky": ["C03"],
   "selected": ["C01", "C05"],
+  "rejected_risky": ["C03"],
   "context_insufficient": false,
   "need_expand_recall": false
 }}

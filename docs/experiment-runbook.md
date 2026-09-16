@@ -1177,7 +1177,7 @@ v7恢复了覆盖，但300题复核仍发现“渗透失水→质壁分离实验
 - 若候选只有相近替代项，必须空标并扩召；不强制产出。
 - Label Card增加`common_assessments`，用于识别原理/实验/应用等考查维度。
 - Prompt不写入300题中已知错例，避免评测泄漏和针对个别题目过拟合；这些题只作回归验收集。
-- 模型JSON按`rejected_risky → selected → context_insufficient → need_expand_recall`生成，先明确排除风险候选，再提交最终Label。
+- v8.1的风险优先顺序使模型过度进入否决模式；299题中265题输出了`rejected_risky`，可训练题从v7的286降至184。v8.2只改回`selected → rejected_risky → context_insufficient → need_expand_recall`生成顺序，其他Prompt和程序逻辑不变，作为单变量顺序消融。
 - v8.1明确`rejected_risky`不是所有未选候选的列表。若模型仍输出超过3项或与`selected`重叠，程序按“拒绝优先”保守归一化，设置`output_conflict=true`并禁止该题进入训练，不再无限重试。
 
 为了只比较Prompt，v8仍先使用原300题和原Top25，不同时接入旧ID增强候选：
@@ -1187,31 +1187,31 @@ cd /local_data/zhangyonglin/Bio-Know-Tag
 git pull --ff-only origin main
 
 AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
-V8_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-reject-wrong"
-mkdir -p "$V8_RUN"
-printf '%s\n' "$V8_RUN" > runtime/LATEST_ADJUDICATION_V8_RUN
+V82_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-2-selected-first"
+mkdir -p "$V82_RUN"
+printf '%s\n' "$V82_RUN" > runtime/LATEST_ADJUDICATION_V82_RUN
 
 nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
   --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
   --labels configs/labels.jsonl \
-  --run-dir "$V8_RUN" \
-  --endpoint 'http://172.22.0.35:9104/v1/chat/completions' \
+  --run-dir "$V82_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
   --model 'DeepSeek-V4-Flash' \
-  --workers 4 \
+  --workers 20 \
   --timeout 300 \
-  --retries 10 \
-  --retry-delay 2 \
-  --request-interval 2 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
   --max-tokens 256 \
-  > "$V8_RUN/nohup.log" 2>&1 &
+  > "$V82_RUN/nohup.log" 2>&1 &
 
 PID=$!
-printf '%s\n' "$PID" > "$V8_RUN/pid"
-printf 'V8_RUN=%s PID=%s\n' "$V8_RUN" "$PID"
+printf '%s\n' "$PID" > "$V82_RUN/pid"
+printf 'V82_RUN=%s PID=%s\n' "$V82_RUN" "$PID"
 ```
 
-完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8.1-risk-first-safe`。精度验收优先级高于`usable_for_training`数量：
+完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8.2-selected-first-ablation`。精度验收优先级高于`usable_for_training`数量：
 
 1. 施肥烧苗不得选质壁分离实验；原Top25缺正确渗透Label时应空标+扩召。
 2. 两基因三种表型应选连锁，不得用分离/自由组合替代。

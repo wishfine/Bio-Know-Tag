@@ -103,7 +103,7 @@ def test_v8_prompt_uses_asymmetric_loss_and_adversarial_self_check():
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8.1-risk-first-safe"
+    assert PROMPT_VERSION == "candidate-adjudication-v8.2-selected-first-ablation"
     assert "错标的代价远高于漏标" in prompt
     assert "五道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -117,8 +117,8 @@ def test_v8_prompt_uses_asymmetric_loss_and_adversarial_self_check():
     assert '"rejected_risky": ["C03"]' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
-    assert schema.index('"rejected_risky"') < schema.index('"selected"')
-    assert schema.index('"selected"') < schema.index('"context_insufficient"')
+    assert schema.index('"selected"') < schema.index('"rejected_risky"')
+    assert schema.index('"rejected_risky"') < schema.index('"context_insufficient"')
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert "evidence" not in prompt
 
