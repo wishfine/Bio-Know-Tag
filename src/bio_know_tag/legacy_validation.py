@@ -283,6 +283,7 @@ def augment_candidates_with_legacy(
     labels_path: str | Path,
     run_dir: str | Path,
     *,
+    legacy_units_path: str | Path | None = None,
     max_legacy_additions: int | None = None,
 ) -> dict[str, Any]:
     """Append only current-taxonomy legacy IDs to an existing candidate sidecar."""
@@ -295,6 +296,19 @@ def augment_candidates_with_legacy(
     output_path = output_dir / "candidates.jsonl"
     temporary = output_path.with_name(f".{output_path.name}.tmp")
     questions = additions = already_present = obsolete_removed = truncated = 0
+    legacy_source_rows_scanned = 0
+    legacy_by_id: dict[str, dict[str, Any]] = {}
+    target_question_ids: set[str] = set()
+    if legacy_units_path is not None:
+        target_question_ids = {
+            str(unit.get("question_id") or "") for unit in _read_jsonl(units_path)
+        }
+        target_question_ids.discard("")
+        for source_unit in _read_jsonl(legacy_units_path):
+            legacy_source_rows_scanned += 1
+            question_id = str(source_unit.get("question_id") or "")
+            if question_id in target_question_ids:
+                legacy_by_id[question_id] = source_unit
     count_distribution: Counter[str] = Counter()
     units = _read_jsonl(units_path)
     candidates = _read_jsonl(candidates_path)
@@ -306,7 +320,8 @@ def augment_candidates_with_legacy(
             if question_id != str(row.get("question_id") or ""):
                 raise ValueError(f"units/candidates order mismatch at {question_id}")
             questions += 1
-            valid, obsolete = valid_legacy_targets(unit, label_ids)
+            legacy_unit = legacy_by_id.get(question_id, unit)
+            valid, obsolete = valid_legacy_targets(legacy_unit, label_ids)
             obsolete_removed += len(obsolete)
             items = [dict(item) for item in (row.get("candidates") or [])]
             by_id = {str(item.get("label_id")): item for item in items}
@@ -356,6 +371,14 @@ def augment_candidates_with_legacy(
         "obsolete_legacy_assignments_removed": obsolete_removed,
         "legacy_additions_truncated": truncated,
         "max_legacy_additions": max_legacy_additions,
+        "legacy_units_path": str(legacy_units_path) if legacy_units_path else None,
+        "legacy_source_rows_scanned": legacy_source_rows_scanned,
+        "legacy_source_questions_matched": len(legacy_by_id),
+        "legacy_source_questions_missing": (
+            len(target_question_ids - set(legacy_by_id))
+            if legacy_units_path is not None
+            else 0
+        ),
         "candidate_count_distribution": dict(sorted(count_distribution.items(), key=lambda item: int(item[0]))),
     }
     _write_json_atomic(output_dir / "report.json", report)

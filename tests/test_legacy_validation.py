@@ -108,3 +108,46 @@ def test_augment_candidates_adds_only_valid_legacy_labels_without_duplicates(tmp
     assert "OLD" not in json.dumps(row)
     assert report["legacy_candidates_added"] == 1
     assert report["obsolete_legacy_assignments_removed"] == 1
+
+
+def test_augment_candidates_can_join_legacy_ids_from_full_unit_source(tmp_path: Path):
+    audit_units = tmp_path / "audit_units.jsonl"
+    full_units = tmp_path / "full_units.jsonl"
+    candidates = tmp_path / "candidates.jsonl"
+    labels = tmp_path / "labels.jsonl"
+    output = tmp_path / "augmented"
+    _write_jsonl(labels, _labels())
+    _write_jsonl(audit_units, [{"question_id": "q2", "stem": "审计题"}])
+    _write_jsonl(
+        full_units,
+        [
+            {"question_id": "q1", "legacy_knw_ids": ["L1"]},
+            {"question_id": "q2", "legacy_knw_ids": ["L2", "OLD"]},
+            {"question_id": "q3", "legacy_knw_ids": ["L1"]},
+        ],
+    )
+    _write_jsonl(
+        candidates,
+        [
+            {
+                "question_id": "q2",
+                "retrieval_version": "hybrid-v1-s18-d7-k25",
+                "candidates": [{"label_id": "L1", "sources": ["sparse"]}],
+            }
+        ],
+    )
+
+    report = augment_candidates_with_legacy(
+        audit_units,
+        candidates,
+        labels,
+        output,
+        legacy_units_path=full_units,
+    )
+
+    row = json.loads((output / "candidates.jsonl").read_text())
+    assert [item["label_id"] for item in row["candidates"]] == ["L1", "L2"]
+    assert row["candidates"][1]["sources"] == ["legacy"]
+    assert report["legacy_source_rows_scanned"] == 3
+    assert report["legacy_source_questions_matched"] == 1
+    assert report["legacy_source_questions_missing"] == 0

@@ -16,6 +16,11 @@ def main() -> int:
     parser.add_argument("--units", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--labels", type=Path, default=Path("configs/labels.jsonl"))
+    parser.add_argument(
+        "--legacy-units",
+        type=Path,
+        help="full labeling-unit source containing legacy_knw_ids, joined by question_id",
+    )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--max-legacy-additions", type=int)
     args = parser.parse_args()
@@ -25,6 +30,7 @@ def main() -> int:
         args.candidates,
         args.labels,
         run_dir,
+        legacy_units_path=args.legacy_units,
         max_legacy_additions=args.max_legacy_additions,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))

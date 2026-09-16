@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run resumable DS T/F judgments for question-Label boundary samples."""
+"""Run resumable DS scored judgments for question-Label definition coverage."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--retry-delay", type=float, default=2)
     parser.add_argument("--request-interval", type=float, default=2)
-    parser.add_argument("--max-tokens", type=int, default=32)
+    parser.add_argument("--max-tokens", type=int, default=256)
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()

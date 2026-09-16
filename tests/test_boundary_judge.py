@@ -1,6 +1,8 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from bio_know_tag.boundary_judge import (
     build_boundary_prompt,
     build_boundary_sample,
@@ -79,11 +81,41 @@ def test_boundary_prompt_contains_teacher_fields_and_no_legacy_ids():
     assert "common_assessments：考查复制次数和同位素分布。" in prompt
     assert "distinctions：与转录区分。" in prompt
     assert "legacy_knw_ids" not in prompt
-    assert '"applicable":true' in prompt
+    assert "常见考查方式是示例而不是穷举清单" in prompt
+    assert '"score":0.92' in prompt
+    assert '"difference_type":"matched"' in prompt
 
 
-def test_validate_boundary_result_requires_boolean_only():
-    assert validate_boundary_result({"applicable": True}) == {"applicable": True}
+def test_validate_boundary_result_derives_match_from_score():
+    result = validate_boundary_result(
+        {
+            "score": 0.82,
+            "difference_type": "matched",
+            "reason": "题目直接考查DNA半保留复制。",
+        }
+    )
+
+    assert result == {
+        "score": 0.82,
+        "match": True,
+        "difference_type": "matched",
+        "reason": "题目直接考查DNA半保留复制。",
+    }
+
+
+@pytest.mark.parametrize("score,expected", [(0.7, True), (0.69, False), (0.0, False), (1.0, True)])
+def test_validate_boundary_result_uses_fixed_match_threshold(score, expected):
+    result = validate_boundary_result(
+        {"score": score, "difference_type": "boundary_ambiguous", "reason": "边界测试"}
+    )
+    assert result["match"] is expected
+
+
+def test_validate_boundary_result_rejects_unknown_difference_type():
+    with pytest.raises(ValueError, match="difference_type"):
+        validate_boundary_result(
+            {"score": 0.5, "difference_type": "unknown", "reason": "理由"}
+        )
 
 
 def test_run_boundary_judge_resumes_successful_pairs(tmp_path: Path):
@@ -109,7 +141,14 @@ def test_run_boundary_judge_resumes_successful_pairs(tmp_path: Path):
     )
 
     class Response:
-        content = '{"applicable":true}'
+        content = json.dumps(
+            {
+                "score": 0.91,
+                "difference_type": "matched",
+                "reason": "题目直接考查DNA复制。",
+            },
+            ensure_ascii=False,
+        )
         endpoint = "fake"
         attempts = 1
         latency_seconds = 0.1
@@ -123,14 +162,19 @@ def test_run_boundary_judge_resumes_successful_pairs(tmp_path: Path):
 
         def chat(self, messages, *, max_tokens):
             self.calls += 1
-            assert max_tokens == 32
+            assert max_tokens == 256
             return Response()
 
     client = Client()
-    first = run_boundary_judge(samples, labels, output, client, model="fake", max_tokens=32)
-    second = run_boundary_judge(samples, labels, output, client, model="fake", max_tokens=32)
+    first = run_boundary_judge(samples, labels, output, client, model="fake", max_tokens=256)
+    second = run_boundary_judge(samples, labels, output, client, model="fake", max_tokens=256)
 
     assert first["success"] == first["input"] == 1
-    assert first["legacy_positive_true_rate"] == 1.0
+    assert first["legacy_positive_match_rate"] == 1.0
+    assert first["score_distribution"][">=0.90"] == 1
     assert second["success"] == 1
     assert client.calls == 1
+    prediction = json.loads((output / "predictions.jsonl").read_text())
+    assert prediction["match"] is True
+    assert prediction["score"] == 0.91
+    assert prediction["difference_type"] == "matched"

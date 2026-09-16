@@ -1328,3 +1328,193 @@ printf 'V86_RUN=%s PID=%s\n' "$V86_RUN" "$PID"
 ```
 
 核心比较：v8.6与v8.3的Label集合一致率、v8.6与v8.5的一致率、可训练/空标/context/expand，以及施肥烧苗、固定化脲酶、ABA-Cl⁻、基因连锁、水跨膜、新冠疫苗等回归题。
+
+## 25. Top25 + 当前458内旧knw_ids精判消融
+
+目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+LEGACY_AUG_RUN="runtime/$(date +%Y%m%d-%H%M%S)-audit-top25-plus-legacy"
+
+mkdir -p "$LEGACY_AUG_RUN"
+printf '%s\n' "$LEGACY_AUG_RUN" > runtime/LATEST_AUDIT_TOP25_PLUS_LEGACY_RUN
+
+PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --legacy-units "$UNIT_RUN/label_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$LEGACY_AUG_RUN"
+
+python -m json.tool "$LEGACY_AUG_RUN/report.json"
+```
+
+这里故意不传`--max-legacy-additions`：同一题所有仍属于当前458的旧ID都应进入候选，报告中的候选数因此可能大于25。
+
+```bash
+V86_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-6-top25-plus-legacy"
+mkdir -p "$V86_LEGACY_RUN"
+printf '%s\n' "$V86_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V86_LEGACY_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$LEGACY_AUG_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V86_LEGACY_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$V86_LEGACY_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V86_LEGACY_RUN/pid"
+printf 'V86_LEGACY_RUN=%s PID=%s\n' "$V86_LEGACY_RUN" "$PID"
+```
+
+只比较以下变化：明确错标数、原Top25空标题是否被正确旧ID救回、是否因旧标签噪声新增错标、`usable_for_training`。这个实验不把旧ID当金标。
+
+## 26. 生物Label释义覆盖实验（每Label最多500题）
+
+### 26.1 合并长尾更新数据
+
+更新文件同时包含地理、政治、历史和生物，程序只取`subject=生物`。按`question_id`用更新记录覆盖原始记录，并追加新题；原4.8GB文件保持不变。随后必须重新做父子题聚合和缺父题审计，不能直接把更新文件中的10个小题送入实验。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+RAW='/local_data/zhangyonglin/data/bio-know-tag/biology.raw.jsonl'
+UPDATE_ROOT='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/update-data'
+MERGED_RAW='/local_data/zhangyonglin/data/bio-know-tag/biology.with-update-20260914.raw.jsonl'
+MERGE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-merge-biology-updates"
+
+mkdir -p "$MERGE_RUN"
+PYTHONPATH=src python scripts/merge_question_updates.py \
+  --base "$RAW" \
+  --updates "$UPDATE_ROOT/all.jsonl" \
+  --subject '生物' \
+  --output "$MERGED_RAW" \
+  --report "$MERGE_RUN/report.json"
+
+python -m json.tool "$MERGE_RUN/report.json"
+```
+
+验收重点：`subject_update_rows=45`，且`output_rows = base_rows + new_rows_added`；`existing_rows_updated`与`new_rows_added`由实际数据决定。
+
+### 26.2 重新预处理并构建打标单元
+
+```bash
+UPDATED_PREPROCESS_RUN="runtime/$(date +%Y%m%d-%H%M%S)-preprocess-with-updates"
+mkdir -p "$UPDATED_PREPROCESS_RUN"
+
+nohup env PYTHONPATH=src python scripts/preprocess_questions.py \
+  --input "$MERGED_RAW" \
+  --run-dir "$UPDATED_PREPROCESS_RUN" \
+  > "$UPDATED_PREPROCESS_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$UPDATED_PREPROCESS_RUN/pid"
+printf '%s\n' "$UPDATED_PREPROCESS_RUN" > runtime/LATEST_UPDATED_PREPROCESS_RUN
+```
+
+预处理结束后：
+
+```bash
+python -m json.tool "$UPDATED_PREPROCESS_RUN/report.json"
+
+UPDATED_ORPHAN_RUN="runtime/$(date +%Y%m%d-%H%M%S)-orphan-audit-with-updates"
+mkdir -p "$UPDATED_ORPHAN_RUN"
+PYTHONPATH=src python scripts/audit_orphan_parents.py \
+  --raw "$MERGED_RAW" \
+  --processed "$UPDATED_PREPROCESS_RUN/questions.jsonl" \
+  --run-dir "$UPDATED_ORPHAN_RUN"
+
+UPDATED_UNIT_RUN="runtime/$(date +%Y%m%d-%H%M%S)-label-units-with-updates"
+mkdir -p "$UPDATED_UNIT_RUN"
+PYTHONPATH=src python scripts/build_label_units.py \
+  --input "$UPDATED_PREPROCESS_RUN/questions.jsonl" \
+  --labels configs/label_strategies.review2.jsonl \
+  --orphan-audit "$UPDATED_ORPHAN_RUN/orphan_parents.jsonl" \
+  --run-dir "$UPDATED_UNIT_RUN"
+
+printf '%s\n' "$UPDATED_UNIT_RUN" > runtime/LATEST_UPDATED_LABEL_UNITS_RUN
+```
+
+### 26.3 抽样与DS评分
+
+每个Label最多抽500个仍带该当前Label历史ID的实际打标单元（独立题、小题、缺父题小题）。历史ID只是找题用的弱监督，不是金标。DS只看到Label名称、老师四字段释义和题目，不看到`knw_ids`。
+
+```bash
+COVERAGE_SAMPLE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-coverage-sample500"
+mkdir -p "$COVERAGE_SAMPLE_RUN"
+printf '%s\n' "$COVERAGE_SAMPLE_RUN" > runtime/LATEST_DEFINITION_COVERAGE_SAMPLE_RUN
+
+PYTHONPATH=src python scripts/build_label_boundary_sample.py \
+  --units "$UPDATED_UNIT_RUN/label_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$COVERAGE_SAMPLE_RUN" \
+  --positive-per-label 500 \
+  --negative-per-label 0 \
+  --seed definition-coverage-biology-v2
+
+python -m json.tool "$COVERAGE_SAMPLE_RUN/report.json"
+wc -l "$COVERAGE_SAMPLE_RUN/boundary_samples.jsonl"
+```
+
+先跑20条smoke：
+
+```bash
+COVERAGE_SMOKE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-coverage-smoke"
+mkdir -p "$COVERAGE_SMOKE_RUN"
+PYTHONPATH=src python scripts/run_label_boundary_judge.py \
+  --samples "$COVERAGE_SAMPLE_RUN/boundary_samples.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$COVERAGE_SMOKE_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  --limit 20
+
+python -m json.tool "$COVERAGE_SMOKE_RUN/report.json"
+```
+
+确认输出包含`score`、程序派生的`match`、`difference_type`和简短`reason`后再全量后台运行：
+
+```bash
+COVERAGE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-coverage-full"
+mkdir -p "$COVERAGE_RUN"
+printf '%s\n' "$COVERAGE_RUN" > runtime/LATEST_DEFINITION_COVERAGE_RUN
+
+nohup env PYTHONPATH=src python scripts/run_label_boundary_judge.py \
+  --samples "$COVERAGE_SAMPLE_RUN/boundary_samples.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$COVERAGE_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$COVERAGE_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$COVERAGE_RUN/pid"
+printf 'COVERAGE_RUN=%s PID=%s\n' "$COVERAGE_RUN" "$PID"
+```
+
+报告输出：`report.json`给总体分段、题型、差异类型和按题最高分的A/B/C/D级；`per_label.jsonl`给逐Label匹配率、均分、0分率、灰度区及差异类型；`predictions.jsonl`保留逐题逐Label的分数和理由。重点把`definition_too_narrow`与`legacy_label_wrong`分开，避免将旧题错标误诊为老师释义问题。

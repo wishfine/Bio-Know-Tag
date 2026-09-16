@@ -1,4 +1,4 @@
-"""Binary DS Judge for teacher-authored Label boundaries using legacy weak labels."""
+"""Scored DS Judge for teacher-authored Label coverage using legacy weak labels."""
 
 from __future__ import annotations
 
@@ -15,7 +15,18 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.legacy_validation import valid_legacy_targets
 
 
-PROMPT_VERSION = "label-boundary-binary-v1"
+PROMPT_VERSION = "label-definition-coverage-v2"
+MATCH_THRESHOLD = 0.70
+DIFFERENCE_TYPES = {
+    "matched",
+    "legacy_label_wrong",
+    "parent_union_not_child",
+    "definition_too_narrow",
+    "boundary_ambiguous",
+    "related_but_not_direct",
+    "context_insufficient",
+    "invalid_question",
+}
 
 
 def _read_jsonl(path: str | Path) -> Iterable[dict[str, Any]]:
@@ -195,12 +206,28 @@ def _clip(value: Any, size: int) -> str:
 
 
 def build_boundary_prompt(sample: dict[str, Any], label: dict[str, Any]) -> str:
-    """Build a compact binary prompt without exposing historical IDs."""
-    return f"""你是严格的高中生物知识点边界审核员。
+    """Build a scored definition-coverage prompt without exposing historical IDs."""
+    unit_type = str(sample.get("unit_type") or "unknown")
+    return f"""你是严格的高中生物知识点释义覆盖审核员。
 
-判断完成当前设问时，是否直接需要使用下面这个Label。
-只有题目的正确解答、对选项正误的必要判断，或解析的核心推理直接使用该Label时，才判true。
-材料背景、实验工具、弱相关联想、上位概念或被distinctions排除的相近内容，判false。
+任务：判断“当前题目实际考查内容”与给定Label及老师释义的匹配程度。
+只判断当前题目；父题材料只用于补全当前小题的指代和语境。
+
+判定原则：
+1. 只有正确解题、判断选项或解析核心推理直接需要该知识点，才算匹配。
+2. 材料背景、实验工具、弱相关联想、仅时间/章节相邻、宽泛上位概念，不算匹配。
+3. 对小题，父题级Label并不自动属于每个小题；若只属于父题或兄弟小题，应识别为parent_union_not_child。
+4. common_assessments中的常见考查方式是示例而不是穷举清单；题目未逐字命中示例，但实质属于该Label时仍可高分。
+5. 若Label名称明显适合、但老师释义遗漏了正常且重要的考查范围，应标为definition_too_narrow，而不是简单断言旧标签错误。
+6. 不得因为历史上可能打过该标签而迁就；你看不到旧ID，只依据题目和老师给出的Label信息判断。
+
+分数标准：
+- 0.90-1.00：核心考点明确属于该Label，边界清楚。
+- 0.80-0.89：明确匹配，仅有很小边界差异。
+- 0.70-0.79：可以判为匹配，但存在边界或信息不完整风险。
+- 0.40-0.69：有关联或释义疑似偏窄，但不足以确认匹配。
+- 0.10-0.39：弱关联、背景关联或相近知识点。
+- 0.00-0.09：基本无关；完全无关时给0。
 
 Label名称：{label.get('label_name', '')}
 definition：{label.get('definition', '')}
@@ -208,21 +235,45 @@ core_concepts：{label.get('core_concepts', '')}
 common_assessments：{label.get('common_assessments', '')}
 distinctions：{label.get('distinctions', '')}
 
+题目单元类型：{unit_type}
 父题公共材料（仅作当前小题语境）：{_clip(sample.get('parent_stem'), 1200)}
 当前题干：{_clip(sample.get('stem'), 2400)}
 选项：{_clip(sample.get('options'), 1600)}
 答案：{_clip(sample.get('answer_text'), 1000)}
 解析：{_clip(sample.get('analysis'), 3000)}
 
-只输出JSON，不要解释：
-{{"applicable":true}}
+差异类型只能从以下值选择一个：
+matched、legacy_label_wrong、parent_union_not_child、definition_too_narrow、boundary_ambiguous、related_but_not_direct、context_insufficient、invalid_question
+
+只输出JSON，不要输出Markdown：
+{{"score":0.92,"difference_type":"matched","reason":"一句话说明题目实际考点与释义是否覆盖"}}
 """.strip()
 
 
-def validate_boundary_result(value: dict[str, Any]) -> dict[str, bool]:
-    if set(value) != {"applicable"} or not isinstance(value.get("applicable"), bool):
-        raise ValueError("response must contain only boolean applicable")
-    return {"applicable": value["applicable"]}
+def validate_boundary_result(value: dict[str, Any]) -> dict[str, Any]:
+    required = {"score", "difference_type", "reason"}
+    if set(value) != required:
+        raise ValueError(f"response must contain exactly: {sorted(required)}")
+    score = value.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        raise ValueError("score must be a number")
+    score = float(score)
+    if not 0.0 <= score <= 1.0:
+        raise ValueError("score must be between 0 and 1")
+    difference_type = value.get("difference_type")
+    if difference_type not in DIFFERENCE_TYPES:
+        raise ValueError(f"unknown difference_type: {difference_type}")
+    reason = value.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason must be a non-empty string")
+    if len(reason) > 1000:
+        raise ValueError("reason is too long")
+    return {
+        "score": round(score, 6),
+        "match": score >= MATCH_THRESHOLD,
+        "difference_type": difference_type,
+        "reason": reason.strip(),
+    }
 
 
 def _latest_success(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
@@ -244,11 +295,11 @@ def run_boundary_judge(
     client: Any,
     *,
     model: str,
-    max_tokens: int = 32,
+    max_tokens: int = 256,
     workers: int = 1,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """Run resumable binary Judge requests for sampled question-Label pairs."""
+    """Run resumable scored Judge requests for sampled question-Label pairs."""
     if workers < 1:
         raise ValueError("workers must be positive")
     samples = list(_read_jsonl(samples_path))
@@ -285,7 +336,7 @@ def run_boundary_judge(
             raise ValueError(f"sample uses obsolete or unknown label_id: {label_id}")
         prompt = build_boundary_prompt(sample, labels[label_id])
         record = {
-            "stage": "label_boundary_binary_judge",
+            "stage": "label_definition_coverage_judge",
             "prompt_version": PROMPT_VERSION,
             "pair_id": pair_id,
             "question_id": str(sample["question_id"]),
@@ -308,7 +359,7 @@ def run_boundary_judge(
         try:
             response = client.chat(
                 [
-                    {"role": "system", "content": "你是严格的高中生物知识点边界审核员，只输出JSON。"},
+                    {"role": "system", "content": "你是严格的高中生物知识点释义覆盖审核员，只输出JSON。"},
                     {"role": "user", "content": prompt},
                 ],
                 max_tokens=max_tokens,
@@ -348,27 +399,33 @@ def run_boundary_judge(
     completed, evidence_rows = _latest_success(evidence_path)
     report = _summarize(samples, completed, evidence_rows, model, workers)
     _write_json_atomic(output_dir / "report.json", report)
-    per_label_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    per_label_records: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in completed.values():
-        label_id = str(record["label_id"])
-        relation = str(record.get("expected_relation") or "")
-        applicable = bool(record["parsed_response"]["applicable"])
-        per_label_counts[label_id][f"{relation}_total"] += 1
-        per_label_counts[label_id][f"{relation}_{str(applicable).lower()}"] += 1
+        per_label_records[str(record["label_id"])].append(record)
     per_label_path = output_dir / "per_label.jsonl"
     with per_label_path.open("w", encoding="utf-8", newline="\n") as output:
-        for label_id, counter in sorted(per_label_counts.items()):
-            positive_total = counter["legacy_positive_total"]
-            negative_total = counter["sibling_hard_negative_total"]
+        for label_id, records in sorted(per_label_records.items()):
+            positives = [r for r in records if r.get("expected_relation") == "legacy_positive"]
+            negatives = [r for r in records if r.get("expected_relation") == "sibling_hard_negative"]
+            positive_scores = [float(r["parsed_response"]["score"]) for r in positives]
+            negative_scores = [float(r["parsed_response"]["score"]) for r in negatives]
+            positive_match = sum(bool(r["parsed_response"]["match"]) for r in positives)
+            negative_nonmatch = sum(not bool(r["parsed_response"]["match"]) for r in negatives)
             row = {
                 "label_id": label_id,
                 "label_name": labels[label_id].get("label_name", ""),
-                "legacy_positive_total": positive_total,
-                "legacy_positive_true": counter["legacy_positive_true"],
-                "legacy_positive_true_rate": round(counter["legacy_positive_true"] / positive_total, 6) if positive_total else None,
-                "sibling_negative_total": negative_total,
-                "sibling_negative_false": counter["sibling_hard_negative_false"],
-                "sibling_negative_false_rate": round(counter["sibling_hard_negative_false"] / negative_total, 6) if negative_total else None,
+                "legacy_positive_total": len(positives),
+                "legacy_positive_match": positive_match,
+                "legacy_positive_match_rate": round(positive_match / len(positives), 6) if positives else None,
+                "legacy_positive_mean_score": round(sum(positive_scores) / len(positive_scores), 6) if positive_scores else None,
+                "legacy_positive_zero_score": sum(score == 0 for score in positive_scores),
+                "legacy_positive_gray_zone": sum(0.40 <= score < MATCH_THRESHOLD for score in positive_scores),
+                "legacy_positive_score_distribution": dict(sorted(Counter(_score_bucket(score) for score in positive_scores).items())),
+                "legacy_positive_difference_types": dict(sorted(Counter(r["parsed_response"]["difference_type"] for r in positives).items())),
+                "sibling_negative_total": len(negatives),
+                "sibling_negative_nonmatch": negative_nonmatch,
+                "sibling_negative_nonmatch_rate": round(negative_nonmatch / len(negatives), 6) if negatives else None,
+                "sibling_negative_mean_score": round(sum(negative_scores) / len(negative_scores), 6) if negative_scores else None,
             }
             output.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
     predictions_path = output_dir / "predictions.jsonl"
@@ -381,16 +438,71 @@ def run_boundary_judge(
                     "question_id": record["question_id"],
                     "label_id": record["label_id"],
                     "expected_relation": record["expected_relation"],
-                    "applicable": record["parsed_response"]["applicable"],
+                    "unit_type": record.get("unit_type"),
+                    "score": record["parsed_response"]["score"],
+                    "match": record["parsed_response"]["match"],
+                    "difference_type": record["parsed_response"]["difference_type"],
+                    "reason": record["parsed_response"]["reason"],
                 }, ensure_ascii=False, sort_keys=True) + "\n")
     return report
+
+
+def _score_bucket(score: float) -> str:
+    if score >= 0.90:
+        return ">=0.90"
+    if score >= 0.80:
+        return "0.80-0.89"
+    if score >= 0.70:
+        return "0.70-0.79"
+    if score >= 0.40:
+        return "0.40-0.69"
+    if score >= 0.30:
+        return "0.30-0.39"
+    if score >= 0.20:
+        return "0.20-0.29"
+    if score >= 0.10:
+        return "0.10-0.19"
+    if score > 0:
+        return "0.01-0.09"
+    return "0.00"
 
 
 def _summarize(samples: list[dict[str, Any]], completed: dict[str, dict[str, Any]], evidence_rows: int, model: str, workers: int) -> dict[str, Any]:
     positives = [record for record in completed.values() if record.get("expected_relation") == "legacy_positive"]
     negatives = [record for record in completed.values() if record.get("expected_relation") == "sibling_hard_negative"]
-    positive_true = sum(record["parsed_response"]["applicable"] for record in positives)
-    negative_false = sum(not record["parsed_response"]["applicable"] for record in negatives)
+    positive_match = sum(record["parsed_response"]["match"] for record in positives)
+    negative_nonmatch = sum(not record["parsed_response"]["match"] for record in negatives)
+    all_records = list(completed.values())
+    score_distribution = Counter(_score_bucket(float(record["parsed_response"]["score"])) for record in all_records)
+    difference_types = Counter(record["parsed_response"]["difference_type"] for record in all_records)
+    by_unit_type: dict[str, dict[str, Any]] = {}
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in positives:
+        grouped[str(record.get("unit_type") or "unknown")].append(record)
+    for unit_type, records in sorted(grouped.items()):
+        matches = sum(record["parsed_response"]["match"] for record in records)
+        by_unit_type[unit_type] = {
+            "legacy_positive_total": len(records),
+            "match": matches,
+            "match_rate": round(matches / len(records), 6),
+            "mean_score": round(sum(record["parsed_response"]["score"] for record in records) / len(records), 6),
+        }
+    question_scores: dict[str, list[float]] = defaultdict(list)
+    for record in positives:
+        question_scores[str(record["question_id"])].append(float(record["parsed_response"]["score"]))
+    question_grades: Counter[str] = Counter()
+    for scores in question_scores.values():
+        best = max(scores)
+        if best >= 0.80:
+            question_grades["A_>=0.80"] += 1
+        elif best >= MATCH_THRESHOLD:
+            question_grades["B_0.70-0.79"] += 1
+        elif best >= 0.40:
+            question_grades["C_0.40-0.69"] += 1
+        elif best == 0:
+            question_grades["D_zero"] += 1
+        else:
+            question_grades["D_0.01-0.39"] += 1
     success = len(completed)
     return {
         "input": len(samples),
@@ -402,11 +514,19 @@ def _summarize(samples: list[dict[str, Any]], completed: dict[str, dict[str, Any
         "prompt_version": PROMPT_VERSION,
         "model": model,
         "workers": workers,
+        "match_threshold": MATCH_THRESHOLD,
+        "score_distribution": dict(sorted(score_distribution.items())),
+        "gray_zone_0.40_0.69": sum(0.40 <= record["parsed_response"]["score"] < MATCH_THRESHOLD for record in all_records),
+        "difference_type_counts": dict(sorted(difference_types.items())),
         "legacy_positive_completed": len(positives),
-        "legacy_positive_true": positive_true,
-        "legacy_positive_true_rate": round(positive_true / len(positives), 6) if positives else None,
+        "legacy_positive_match": positive_match,
+        "legacy_positive_match_rate": round(positive_match / len(positives), 6) if positives else None,
+        "legacy_positive_score_distribution": dict(sorted(Counter(_score_bucket(float(record["parsed_response"]["score"])) for record in positives).items())),
+        "legacy_positive_by_unit_type": by_unit_type,
+        "unique_questions_with_legacy_positive": len(question_scores),
+        "question_training_grade_distribution": dict(sorted(question_grades.items())),
         "sibling_negative_completed": len(negatives),
-        "sibling_negative_false": negative_false,
-        "sibling_negative_false_rate": round(negative_false / len(negatives), 6) if negatives else None,
+        "sibling_negative_nonmatch": negative_nonmatch,
+        "sibling_negative_nonmatch_rate": round(negative_nonmatch / len(negatives), 6) if negatives else None,
         "ground_truth_warning": "Agreement with legacy weak labels is diagnostic, not gold accuracy.",
     }
