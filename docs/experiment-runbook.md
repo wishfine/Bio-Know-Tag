@@ -1178,6 +1178,7 @@ v7恢复了覆盖，但300题复核仍发现“渗透失水→质壁分离实验
 - Label Card增加`common_assessments`，用于识别原理/实验/应用等考查维度。
 - Prompt不写入300题中已知错例，避免评测泄漏和针对个别题目过拟合；这些题只作回归验收集。
 - 模型JSON按`rejected_risky → selected → context_insufficient → need_expand_recall`生成，先明确排除风险候选，再提交最终Label。
+- v8.1明确`rejected_risky`不是所有未选候选的列表。若模型仍输出超过3项或与`selected`重叠，程序按“拒绝优先”保守归一化，设置`output_conflict=true`并禁止该题进入训练，不再无限重试。
 
 为了只比较Prompt，v8仍先使用原300题和原Top25，不同时接入旧ID增强候选：
 
@@ -1202,7 +1203,7 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --retries 10 \
   --retry-delay 2 \
   --request-interval 2 \
-  --max-tokens 128 \
+  --max-tokens 256 \
   > "$V8_RUN/nohup.log" 2>&1 &
 
 PID=$!
@@ -1210,7 +1211,7 @@ printf '%s\n' "$PID" > "$V8_RUN/pid"
 printf 'V8_RUN=%s PID=%s\n' "$V8_RUN" "$PID"
 ```
 
-完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8-generalized-reject-wrong-labels`。精度验收优先级高于`usable_for_training`数量：
+完成条件仍是`input=processed=success=300`、`error=pending=0`，Prompt版本应为`candidate-adjudication-v8.1-risk-first-safe`。精度验收优先级高于`usable_for_training`数量：
 
 1. 施肥烧苗不得选质壁分离实验；原Top25缺正确渗透Label时应空标+扩召。
 2. 两基因三种表型应选连锁，不得用分离/自由组合替代。
@@ -1218,3 +1219,4 @@ printf 'V8_RUN=%s PID=%s\n' "$V8_RUN" "$PID"
 4. ABA-Cl⁻载体题不得选蛋白质变性/泛化功能。
 5. 固定化脂酶题在无准确现行Label时不得选尿素分解菌。
 6. `rejected_risky_labels`必须与`selected_labels`分离；报告会统计`rejected_risky_count`和`questions_with_rejected_risky`。
+7. `output_conflict`的题不得进入训练；报告会统计风险列表截断、选中/拒绝重叠和强制扩召次数。

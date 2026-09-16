@@ -103,7 +103,7 @@ def test_v8_prompt_uses_asymmetric_loss_and_adversarial_self_check():
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8-generalized-reject-wrong-labels"
+    assert PROMPT_VERSION == "candidate-adjudication-v8.1-risk-first-safe"
     assert "错标的代价远高于漏标" in prompt
     assert "五道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -112,6 +112,8 @@ def test_v8_prompt_uses_asymmetric_loss_and_adversarial_self_check():
     assert "施肥过多" not in prompt
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
+    assert "rejected_risky不是所有未选候选的列表" in prompt
+    assert "输出前做最终协议检查" in prompt
     assert '"rejected_risky": ["C03"]' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
@@ -164,7 +166,7 @@ def test_validate_adjudication_derives_empty_state():
     assert empty["none_of_candidates"] is True
 
 
-def test_validate_v8_rejects_overlap_and_limits_diagnostic_codes():
+def test_validate_v8_safely_normalizes_overlap_and_excess_risk_codes():
     base = {
         "selected": ["C01"],
         "rejected_risky": ["C02"],
@@ -174,26 +176,20 @@ def test_validate_v8_rejects_overlap_and_limits_diagnostic_codes():
     result = validate_adjudication_result(base, {"C01", "C02", "C03", "C04"})
     assert result["rejected_risky"] == ["C02"]
 
-    with pytest.raises(ValueError, match="disjoint"):
-        validate_adjudication_result(
-            {**base, "rejected_risky": ["C01"]},
-            {"C01", "C02"},
-        )
-    with pytest.raises(ValueError, match="at most 3"):
-        validate_adjudication_result(
-            {**base, "rejected_risky": ["C01", "C02", "C03", "C04"]},
-            {"C01", "C02", "C03", "C04"},
-        )
-    with pytest.raises(ValueError, match="need_expand_recall"):
-        validate_adjudication_result(
-            {
-                **base,
-                "selected": [],
-                "rejected_risky": ["C02"],
-                "need_expand_recall": False,
-            },
-            {"C01", "C02"},
-        )
+    normalized = validate_adjudication_result(
+        {**base, "rejected_risky": ["C01", "C02", "C03", "C04"]},
+        {"C01", "C02", "C03", "C04"},
+    )
+
+    assert normalized["selected"] == []
+    assert normalized["rejected_risky"] == ["C01", "C02", "C03"]
+    assert normalized["need_expand_recall"] is True
+    assert normalized["output_conflict"] is True
+    assert normalized["normalization"] == {
+        "rejected_risky_truncated": 1,
+        "selected_removed_as_rejected": ["C01"],
+        "need_expand_recall_forced": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -508,15 +504,22 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
-    ("selected", "expand", "context", "expected_reason"),
+    ("selected", "rejected", "expand", "context", "expected_reason", "output_conflict"),
     [
-        ([], False, False, "empty_selected"),
-        (["C01"], True, False, "need_expand_recall"),
-        (["C01"], False, True, "context_insufficient"),
+        ([], [], False, False, "empty_selected", False),
+        (["C01"], [], True, False, "need_expand_recall", False),
+        (["C01"], [], False, True, "context_insufficient", False),
+        (["C01"], ["C01"], False, False, "output_conflict", True),
     ],
 )
 def test_run_adjudication_filters_risky_training_rows(
-    tmp_path: Path, selected, expand, context, expected_reason
+    tmp_path: Path,
+    selected,
+    rejected,
+    expand,
+    context,
+    expected_reason,
+    output_conflict,
 ):
     units_path = tmp_path / "units.jsonl"
     candidates_path = tmp_path / "candidates.jsonl"
@@ -536,7 +539,7 @@ def test_run_adjudication_filters_risky_training_rows(
         content = json.dumps(
             {
                 "selected": selected,
-                "rejected_risky": [],
+                "rejected_risky": rejected,
                 "need_expand_recall": expand,
                 "context_insufficient": context,
             },
@@ -561,6 +564,7 @@ def test_run_adjudication_filters_risky_training_rows(
     prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
 
     assert prediction["usable_for_training"] is False
+    assert prediction["output_conflict"] is output_conflict
     assert report["usable_for_training"] == 0
     assert report["filtered_from_training"] == 1
     assert report["training_filter_reasons"][expected_reason] == 1

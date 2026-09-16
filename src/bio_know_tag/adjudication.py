@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8-generalized-reject-wrong-labels"
+PROMPT_VERSION = "candidate-adjudication-v8.1-risk-first-safe"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -120,11 +120,13 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 选择规则：
 6. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
 7. 合理多标可以保留，但每一个Label都必须独立通过全部五道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
-8. 若候选表面相关、甚至一度想选，但在反证复核中因定义、维度、distinctions或必要性失败，将其放入rejected_risky，不得留在selected。rejected_risky最多3个，仅用于审计。
+8. 若候选表面相关、甚至一度进入暂选集合，但在反证复核中因定义、维度、distinctions或必要性失败，才将其放入rejected_risky。rejected_risky不是所有未选候选的列表；普通不相关候选不要输出。若超过3个，只保留最容易误选的3个。进入rejected_risky的代码不得再出现于selected。
 9. 题目有明确生物考点，但没有任何候选能通过五道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
 10. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
 11. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
 12. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
+
+输出前做最终协议检查：rejected_risky最多3项，与selected必须完全互斥，普通未选候选不得列入rejected_risky。
 
 只能返回C01等短代码，不能抄写长label_id。
 
@@ -176,27 +178,44 @@ def validate_adjudication_result(
         return normalized_values
 
     normalized = normalize_codes("selected")
-    rejected_risky = normalize_codes("rejected_risky")
-    if len(rejected_risky) > 3:
-        raise ValueError("rejected_risky must contain at most 3 codes")
-    if set(normalized) & set(rejected_risky):
-        raise ValueError("selected and rejected_risky must be disjoint")
+    raw_rejected_risky = normalize_codes("rejected_risky")
+    rejected_risky_truncated = max(0, len(raw_rejected_risky) - 3)
+    rejected_risky = raw_rejected_risky[:3]
+    rejected_set = set(raw_rejected_risky)
+    selected_removed_as_rejected = [
+        code for code in normalized if code in rejected_set
+    ]
+    normalized = [code for code in normalized if code not in rejected_set]
     for field in (
         "need_expand_recall",
         "context_insufficient",
     ):
         if not isinstance(value[field], bool):
             raise ValueError(f"{field} must be boolean")
-    if rejected_risky and not normalized and not value["need_expand_recall"]:
-        raise ValueError(
-            "need_expand_recall must be true when only rejected_risky candidates remain"
-        )
+    need_expand_recall_forced = bool(
+        raw_rejected_risky and not normalized and not value["need_expand_recall"]
+    )
+    need_expand_recall = bool(
+        value["need_expand_recall"] or need_expand_recall_forced
+    )
+    normalization = {
+        "rejected_risky_truncated": rejected_risky_truncated,
+        "selected_removed_as_rejected": selected_removed_as_rejected,
+        "need_expand_recall_forced": need_expand_recall_forced,
+    }
+    output_conflict = bool(
+        rejected_risky_truncated
+        or selected_removed_as_rejected
+        or need_expand_recall_forced
+    )
     return {
         "rejected_risky": rejected_risky,
         "selected": normalized,
         "context_insufficient": value["context_insufficient"],
-        "need_expand_recall": value["need_expand_recall"],
+        "need_expand_recall": need_expand_recall,
         "none_of_candidates": not bool(normalized),
+        "output_conflict": output_conflict,
+        "normalization": normalization,
     }
 
 
@@ -428,6 +447,8 @@ def run_adjudication(
     rejected_risky_count = 0
     questions_with_rejected_risky = 0
     rejected_risky_count_distribution: Counter[str] = Counter()
+    output_conflict_count = 0
+    output_normalization_counts: Counter[str] = Counter()
     usable_for_training_count = 0
     training_filter_reasons: Counter[str] = Counter()
     with (
@@ -496,6 +517,18 @@ def run_adjudication(
             rejected_risky_count += len(rejected_risky_labels)
             questions_with_rejected_risky += int(bool(rejected_risky_labels))
             rejected_risky_count_distribution[str(len(rejected_risky_labels))] += 1
+            output_conflict = bool(parsed["output_conflict"])
+            output_conflict_count += int(output_conflict)
+            normalization = parsed.get("normalization") or {}
+            output_normalization_counts["rejected_risky_truncated"] += int(
+                normalization.get("rejected_risky_truncated") or 0
+            )
+            output_normalization_counts["selected_removed_as_rejected"] += len(
+                normalization.get("selected_removed_as_rejected") or []
+            )
+            output_normalization_counts["need_expand_recall_forced"] += int(
+                bool(normalization.get("need_expand_recall_forced"))
+            )
             questions_using_tail += int(used_tail)
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
@@ -504,11 +537,13 @@ def run_adjudication(
             needs_review = bool(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
+                or output_conflict
             )
             usable_for_training = bool(
                 selected_labels
                 and not parsed["need_expand_recall"]
                 and not parsed["context_insufficient"]
+                and not output_conflict
             )
             usable_for_training_count += int(usable_for_training)
             if not selected_labels:
@@ -517,6 +552,8 @@ def run_adjudication(
                 training_filter_reasons["need_expand_recall"] += 1
             if parsed["context_insufficient"]:
                 training_filter_reasons["context_insufficient"] += 1
+            if output_conflict:
+                training_filter_reasons["output_conflict"] += 1
             prediction = {
                 "question_id": question_id,
                 "parent_id": unit.get("parent_id", question_id),
@@ -526,6 +563,8 @@ def run_adjudication(
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
                 "context_insufficient": parsed["context_insufficient"],
+                "output_conflict": output_conflict,
+                "output_normalization": normalization,
                 "needs_review": needs_review,
                 "usable_for_training": usable_for_training,
                 "candidate_count": len(candidates),
@@ -679,6 +718,10 @@ def run_adjudication(
                 rejected_risky_count_distribution.items(),
                 key=lambda item: int(item[0]),
             )
+        ),
+        "output_conflict": output_conflict_count,
+        "output_normalization_counts": dict(
+            sorted(output_normalization_counts.items())
         ),
         "usable_for_training": usable_for_training_count,
         "filtered_from_training": success - usable_for_training_count,
