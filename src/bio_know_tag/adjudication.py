@@ -16,7 +16,8 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8.4-current-question-first"
+PROMPT_VERSION = "candidate-adjudication-v8.5-v83-reason-first"
+CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -67,7 +68,9 @@ def build_adjudication_prompt(
     shuffled_candidates = sorted(
         candidates,
         key=lambda candidate: hashlib.sha256(
-            f"{question_id}\0{candidate['label_id']}\0{PROMPT_VERSION}".encode("utf-8")
+            f"{question_id}\0{candidate['label_id']}\0{CANDIDATE_ORDER_VERSION}".encode(
+                "utf-8"
+            )
         ).digest(),
     )
     code_map = {
@@ -88,26 +91,24 @@ def build_adjudication_prompt(
                 "distinctions": label.get("distinctions", ""),
             }
         )
-    current_question = {
+    question = {
         "question_id": question_id,
         "unit_type": unit.get("unit_type", ""),
+        "parent_stem": str(unit.get("parent_stem") or "")[:3000],
         "stem": str(unit.get("stem") or "")[:5000],
         "options": str(unit.get("options") or "")[:3000],
         "answer_text": str(unit.get("answer_text") or "")[:2000],
         "analysis": str(unit.get("analysis") or "")[:6000],
+        "parent_context_missing": bool(
+            (unit.get("flags") or {}).get("parent_context_missing")
+        ),
         "image_context_missing": bool(
             (unit.get("flags") or {}).get("image_context_missing")
         ),
     }
-    parent_context = {
-        "parent_stem": str(unit.get("parent_stem") or "")[:3000],
-        "parent_context_missing": bool(
-            (unit.get("flags") or {}).get("parent_context_missing")
-        ),
-    }
     prompt = f"""你是严谨的高中生物知识点判标器。本任务采用非对称损失：错标的代价远高于漏标。可以少选、置空或扩召，绝不得把只是相关、更宽泛或边界不同的Label写入selected。
 
-任务流程（仅内部执行，不输出理由）：
+任务流程（内部完成判断，只输出简短结论依据，不输出详细思考过程）：
 A. 先用当前设问、选项判断、答案和解析列出“完成本题必须调用的知识”。
 B. 对每个拟选Label逐项通过下面五道硬门槛。
 C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该被选”的证据。只要任意一道不能确定通过，就从selected删除。
@@ -122,7 +123,7 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 选择规则：
 6. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
 7. 合理多标可以保留，但每一个Label都必须独立通过全部五道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
-8. 反证复核失败的候选直接从selected删除，不输出被拒绝的候选、理由或思考过程。
+8. 反证复核失败的候选直接从selected删除；reason只概括最终选择或置空的依据，不逐项输出被拒绝候选或详细思考过程。
 9. 题目有明确生物考点，但没有任何候选能通过五道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
 10. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
 11. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
@@ -130,19 +131,17 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 
 只能返回C01等短代码，不能抄写长label_id。
 
-【唯一判标对象：当前小题】
-当前小题：
-{json.dumps(current_question, ensure_ascii=False)}
-
-【仅用于补全指代，不得作为独立判标依据】
-父题公共材料：
-{json.dumps(parent_context, ensure_ascii=False)}
+题目：
+{json.dumps(question, ensure_ascii=False)}
 
 候选Label（顺序不代表最终正确性）：
 {json.dumps(candidate_cards, ensure_ascii=False)}
 
+reason用1至2句话、不超过120字，说明当前设问、答案或解析如何支持selected；若置空，则说明是候选不匹配、需要扩召还是上下文不足。不要罗列全部候选，不要输出详细思考过程。
+
 只输出一个JSON对象：
 {{
+  "reason": "当前设问直接考查……",
   "selected": ["C01", "C05"],
   "context_insufficient": false,
   "need_expand_recall": false
@@ -156,6 +155,7 @@ def validate_adjudication_result(
     known_codes: set[str],
 ) -> dict[str, Any]:
     required = (
+        "reason",
         "selected",
         "need_expand_recall",
         "context_insufficient",
@@ -180,6 +180,12 @@ def validate_adjudication_result(
                 seen.add(code)
         return normalized_values
 
+    reason = value["reason"]
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("reason must be a non-empty string")
+    reason = reason.strip()
+    if len(reason) > 1000:
+        raise ValueError("reason is too long")
     normalized = normalize_codes("selected")
     for field in (
         "need_expand_recall",
@@ -188,6 +194,7 @@ def validate_adjudication_result(
         if not isinstance(value[field], bool):
             raise ValueError(f"{field} must be boolean")
     return {
+        "reason": reason,
         "selected": normalized,
         "context_insufficient": value["context_insufficient"],
         "need_expand_recall": value["need_expand_recall"],
@@ -488,6 +495,7 @@ def run_adjudication(
                 "question_id": question_id,
                 "parent_id": unit.get("parent_id", question_id),
                 "unit_type": unit.get("unit_type", ""),
+                "reason": parsed["reason"],
                 "selected_labels": selected_labels,
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],

@@ -1262,3 +1262,35 @@ printf 'V84_RUN=%s PID=%s\n' "$V84_RUN" "$PID"
 ```
 
 验收时先检查固定化脲酶题`2326198965676548098`是否从“分离以尿素为氮源的微生物”改为“酶的保存及应用”；同时比较总空标数、`context_insufficient`、`need_expand_recall`和已知回归题，避免为修复一题造成系统性覆盖下降。
+
+实测v8.4未通过：固定化脲酶仍选错，`context_insufficient`从57升至95，可训练题从218降至181；因此不作为后续基线。另发现候选短代码的确定性打乱曾绑定`PROMPT_VERSION`，修改版本名会同时改变候选位置，后续消融必须固定候选排列种子。
+
+### 24.2 v8.5恢复v8.3并输出简短reason
+
+v8.5完整恢复v8.3的题目JSON布局、判标规则和候选排列，候选排列固定使用`candidate-adjudication-v8.3-internal-reflection`作为种子。唯一新增行为是要求DS首先输出简短`reason`：1至2句话、不超过120字，只概括最终选择、置空、扩召或上下文不足的依据，不要求详细思考过程。`reason`同时写入`evidence.jsonl`的`parsed_response`和`predictions.jsonl`，仅用于审计，不参与训练过滤。
+
+```bash
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V85_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-5-reason-first"
+mkdir -p "$V85_RUN"
+printf '%s\n' "$V85_RUN" > runtime/LATEST_ADJUDICATION_V85_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V85_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$V85_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V85_RUN/pid"
+printf 'V85_RUN=%s PID=%s\n' "$V85_RUN" "$PID"
+```

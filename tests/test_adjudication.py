@@ -1,4 +1,5 @@
 import json
+import hashlib
 import threading
 import time
 from pathlib import Path
@@ -75,7 +76,7 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert '"context_insufficient": false' in prompt
     assert "rejected_close_codes" not in prompt
     assert '"necessity"' not in prompt
-    assert '"reason"' not in prompt
+    assert '"reason": "当前设问直接考查……"' in prompt
     assert '"none_of_candidates"' not in prompt
     assert '"missing_knowledge"' not in prompt
 
@@ -100,13 +101,33 @@ def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
     assert any(list(q1_first.values()) != order for order in other_orders)
 
 
-def test_v84_prompt_keeps_internal_reflection_without_rejection_output():
+def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
+    labels = {
+        f"L{index}": _label(f"L{index}", f"标签{index}")
+        for index in range(1, 5)
+    }
+    candidates = [_candidate(index) for index in range(1, 5)]
+
+    _, code_map = build_adjudication_prompt(_unit(), candidates, labels)
+    expected = sorted(
+        (candidate["label_id"] for candidate in candidates),
+        key=lambda label_id: hashlib.sha256(
+            f"q1\0{label_id}\0candidate-adjudication-v8.3-internal-reflection".encode(
+                "utf-8"
+            )
+        ).digest(),
+    )
+
+    assert list(code_map.values()) == expected
+
+
+def test_v85_prompt_restores_v83_layout_and_puts_reason_first():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8.4-current-question-first"
+    assert PROMPT_VERSION == "candidate-adjudication-v8.5-v83-reason-first"
     assert "错标的代价远高于漏标" in prompt
     assert "五道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -116,14 +137,17 @@ def test_v84_prompt_keeps_internal_reflection_without_rejection_output():
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
     assert "rejected_risky" not in prompt
+    assert "reason用1至2句话、不超过120字" in prompt
+    assert '"reason": "当前设问直接考查……"' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
+    assert schema.index('"reason"') < schema.index('"selected"')
     assert schema.index('"selected"') < schema.index('"context_insufficient"')
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert "evidence" not in prompt
 
 
-def test_prompt_presents_current_question_before_parent_context():
+def test_prompt_restores_single_v83_question_object():
     labels = {"L1": _label("L1", "标签一")}
     unit = {
         **_unit(),
@@ -135,19 +159,24 @@ def test_prompt_presents_current_question_before_parent_context():
 
     prompt, _ = build_adjudication_prompt(unit, [_candidate(1)], labels)
 
-    current_section = prompt.index("【唯一判标对象：当前小题】")
-    parent_section = prompt.index("【仅用于补全指代，不得作为独立判标依据】")
-    candidates_section = prompt.index("候选Label（顺序不代表最终正确性）：")
+    assert "【唯一判标对象：当前小题】" not in prompt
+    assert "【仅用于补全指代，不得作为独立判标依据】" not in prompt
+    question_section = prompt.split("题目：", 1)[1].split("候选Label", 1)[0]
+    assert question_section.index("父题背景唯一标识") < question_section.index(
+        "当前小题唯一标识"
+    )
+    assert question_section.index("当前小题唯一标识") < question_section.index(
+        "当前答案唯一标识"
+    )
+    assert question_section.index("当前答案唯一标识") < question_section.index(
+        "当前解析唯一标识"
+    )
 
-    assert current_section < prompt.index("当前小题：") < parent_section
-    assert prompt.index("当前答案唯一标识") < parent_section
-    assert prompt.index("当前解析唯一标识") < parent_section
-    assert parent_section < prompt.index("父题公共材料：") < candidates_section
 
-
-def test_validate_v84_adjudication_accepts_only_final_selected_codes():
+def test_validate_v85_adjudication_accepts_reason_and_final_selected_codes():
     result = validate_adjudication_result(
         {
+            "reason": "当前设问直接考查标签一和标签二。",
             "selected": ["C02", "C01", "C02"],
             "need_expand_recall": False,
             "context_insufficient": False,
@@ -155,12 +184,14 @@ def test_validate_v84_adjudication_accepts_only_final_selected_codes():
         {"C01", "C02"},
     )
 
+    assert result["reason"] == "当前设问直接考查标签一和标签二。"
     assert result["selected"] == ["C02", "C01"]
     assert "rejected_risky" not in result
     assert result["none_of_candidates"] is False
     with pytest.raises(ValueError, match="short codes"):
         validate_adjudication_result(
             {
+                "reason": "理由",
                 "selected": [{"code": "C01", "evidence": "题干"}],
                 "need_expand_recall": False,
                 "context_insufficient": False,
@@ -171,6 +202,7 @@ def test_validate_v84_adjudication_accepts_only_final_selected_codes():
 
 def test_validate_adjudication_derives_empty_state():
     valid = {
+        "reason": "理由",
         "selected": ["C01"],
         "need_expand_recall": False,
         "context_insufficient": False,
@@ -183,6 +215,20 @@ def test_validate_adjudication_derives_empty_state():
         {"C01", "C02"},
     )
     assert empty["none_of_candidates"] is True
+
+
+@pytest.mark.parametrize("reason", [None, "", "   ", 123])
+def test_validate_adjudication_requires_nonempty_string_reason(reason):
+    with pytest.raises(ValueError, match="reason"):
+        validate_adjudication_result(
+            {
+                "reason": reason,
+                "selected": [],
+                "need_expand_recall": True,
+                "context_insufficient": False,
+            },
+            {"C01"},
+        )
 
 
 @pytest.mark.parametrize(
@@ -211,6 +257,7 @@ def test_validate_adjudication_candidate_and_context_states(
     selected, expand, context, valid
 ):
     value = {
+        "reason": "简短理由",
         "selected": selected,
         "need_expand_recall": expand,
         "context_insufficient": context,
@@ -263,6 +310,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     class Response:
         content = json.dumps(
             {
+                "reason": "当前题目直接考查标签23。",
                 "selected": [code_for_l23],
                 "need_expand_recall": False,
                 "context_insufficient": False,
@@ -304,6 +352,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
 
     prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
     assert prediction["selected_labels"][0]["label_id"] == "L23"
+    assert prediction["reason"] == "当前题目直接考查标签23。"
     assert prediction["selected_labels"][0]["candidate_rank"] == 23
     assert "rejected_risky_labels" not in prediction
     assert "output_conflict" not in prediction
@@ -375,6 +424,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
     class Response:
         content = json.dumps(
             {
+                "reason": "当前题目直接考查标签1。",
                 "selected": ["C01"],
                 "need_expand_recall": False,
                 "context_insufficient": False,
@@ -447,6 +497,7 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
     class Response:
         content = json.dumps(
             {
+                "reason": "当前题目直接考查标签1。",
                 "selected": ["C01"],
                 "need_expand_recall": False,
                 "context_insufficient": False,
@@ -524,6 +575,7 @@ def test_run_adjudication_filters_risky_training_rows(
     class Response:
         content = json.dumps(
             {
+                "reason": "根据题目证据作出判断。",
                 "selected": selected,
                 "need_expand_recall": expand,
                 "context_insufficient": context,
