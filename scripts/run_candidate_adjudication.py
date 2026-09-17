@@ -22,6 +22,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--endpoint", action="append", dest="endpoints")
     parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--question-id",
+        action="append",
+        dest="question_ids",
+        help="run only the specified question_id; may be repeated",
+    )
     parser.add_argument("--timeout", type=float, default=180)
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=1.0)
@@ -68,6 +74,7 @@ def main() -> int:
         client,
         model=args.model,
         limit=args.limit,
+        question_ids=set(args.question_ids) if args.question_ids else None,
         max_tokens=args.max_tokens,
         workers=args.workers,
     )

@@ -1625,6 +1625,66 @@ FRUIT_FLY_DEBUG_RUN="$(cat runtime/LATEST_FRUIT_FLY_ADJUDICATION_DEBUG_RUN)"
 python -m json.tool "$FRUIT_FLY_DEBUG_RUN/result.json"
 ```
 
+### V10结构化硬门控
+
+V9.2中DS即使明确识别“Label限定人类，题目对象为果蝇”，仍可用“机制一致”自行覆盖否决条件。V10取消DS最终选择权：DS只输出`proposed + checks`，程序根据固定枚举和证据校验计算`selected_labels`。
+
+硬门槛包括：
+
+- `literal_relation == EXACT`；
+- GENERIC要求`object_match == NOT_APPLICABLE`；
+- RESTRICTED要求`object_match == EXACT`、非空`scope_anchors`和`object_evidence`；
+- `mechanism_relation == DIRECT`；
+- `dimension_match == true`；
+- `necessary == true`；
+- evidence必须是指定题目字段的连续原文；
+- RESTRICTED的scope anchor必须来自Label名称，且直接出现在object evidence中。
+
+先只跑果蝇回归题：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V92_LEGACY_CANDIDATES_RUN="$(
+  cat runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
+)"
+V10_FRUIT_FLY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v10-fruit-fly-smoke"
+
+mkdir -p "$V10_FRUIT_FLY_RUN"
+printf '%s\n' "$V10_FRUIT_FLY_RUN" > runtime/LATEST_V10_FRUIT_FLY_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --question-id '2327493552051331072' \
+  --run-dir "$V10_FRUIT_FLY_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 1 \
+  --timeout 600 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 3000 \
+  > "$V10_FRUIT_FLY_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V10_FRUIT_FLY_RUN/pid"
+printf 'V10_FRUIT_FLY_RUN=%s PID=%s\n' "$V10_FRUIT_FLY_RUN" "$PID"
+```
+
+完成后查看：
+
+```bash
+V10_FRUIT_FLY_RUN="$(cat runtime/LATEST_V10_FRUIT_FLY_RUN)"
+python -m json.tool "$V10_FRUIT_FLY_RUN/report.json"
+python -m json.tool "$V10_FRUIT_FLY_RUN/predictions.jsonl"
+```
+
+预期最终保留“伴性遗传的分类与应用”，并在`gate_rejected_labels`中记录“人类红绿色盲症”的`literal_relation`、`restricted_object_mismatch`或`mechanism_relation`否决。
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。

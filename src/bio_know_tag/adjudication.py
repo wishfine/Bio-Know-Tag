@@ -18,7 +18,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9.2-literal-name-anchored-evidence"
+PROMPT_VERSION = "candidate-adjudication-v10-structured-hard-gates"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 EVIDENCE_SOURCES = ("parent_stem", "stem", "options", "answer_text", "analysis")
 
@@ -116,18 +116,50 @@ def build_adjudication_prompt(
         ),
     }
     if diagnostic_focus_label_ids is None:
-        output_instructions = """evidence.quote每条不超过60字，必须逐字复制连续原文，不得改写、拼接、填空、推导或补写。reason用1至2句话、不超过120字，概括最终选择或置空依据。
+        output_instructions = """你只输出proposed和checks，不输出selected或KEEP/REJECT。最终取舍由程序执行，reason无权修改checks。
+
+对每个proposed候选必须输出一组checks：
+- literal_relation只能是EXACT、ANALOGY_ONLY、FALSE。
+- scope_kind只能是GENERIC、RESTRICTED。
+- scope_anchors是Label名称中的范围限定词；RESTRICTED时至少一个，GENERIC时必须为空。不得把通用机制当作范围限定词。
+- object_match只能是EXACT、NOT_APPLICABLE、MISMATCH。
+- RESTRICTED必须提供object_evidence；quote中必须直接出现scope_anchors中的对象限定，不能用相同机制代替。
+- mechanism_relation只能是DIRECT、SHARED_ONLY、BACKGROUND。
+- dimension_match和necessary只能是布尔值。
+- evidence是支持当前Label考点的原文。
+
+evidence和object_evidence的source只能是parent_stem、stem、options、answer_text、analysis；quote不超过60字，必须逐字复制连续原文，不得改写、拼接、填空、推导或补写。
 
 只输出一个JSON对象：
 {
-  "selected": ["C01", "C05"],
-  "evidence": {
-    "C01": {"source": "stem", "quote": "题目连续原文"},
-    "C05": {"source": "analysis", "quote": "解析连续原文"}
+  "proposed": ["C01", "C05"],
+  "checks": {
+    "C01": {
+      "literal_relation": "EXACT",
+      "scope_kind": "GENERIC",
+      "scope_anchors": [],
+      "object_match": "NOT_APPLICABLE",
+      "object_evidence": null,
+      "mechanism_relation": "DIRECT",
+      "dimension_match": true,
+      "necessary": true,
+      "evidence": {"source": "stem", "quote": "题目连续原文"}
+    },
+    "C05": {
+      "literal_relation": "EXACT",
+      "scope_kind": "RESTRICTED",
+      "scope_anchors": ["具体对象"],
+      "object_match": "EXACT",
+      "object_evidence": {"source": "analysis", "quote": "含具体对象的连续原文"},
+      "mechanism_relation": "DIRECT",
+      "dimension_match": true,
+      "necessary": true,
+      "evidence": {"source": "analysis", "quote": "解析连续原文"}
+    }
   },
   "context_insufficient": false,
   "need_expand_recall": false,
-  "reason": "当前设问直接考查……"
+  "reason": "简要说明题目实际考查什么，不得用reason推翻checks"
 }
 不要输出Markdown或JSON之外的内容。"""
     else:
@@ -174,12 +206,12 @@ evidence.quote可不超过300字，但仍必须是指定source字段的连续原
   "reason": "详细总结最终选择，特别说明重点候选为什么被选或被拒绝"
 }}
 不要输出Markdown或JSON之外的内容。"""
-    prompt = f"""你是严谨的高中生物知识点判标器。本任务采用非对称损失：错标的代价远高于漏标。可以少选、置空或扩召，绝不得把只是相关、更宽泛或边界不同的Label写入selected。
+    prompt = f"""你是严谨的高中生物知识点候选审核器。本任务采用非对称损失：错标的代价远高于漏标。可以少提名、置空或扩召。你不拥有最终选择权；最终Label由程序根据结构化硬门槛计算。
 
 任务流程（内部完成判断，只输出简短结论依据，不输出详细思考过程）：
 A. 先用当前设问、选项判断、答案和解析列出“完成本题必须调用的知识”。
 B. 对每个拟选Label逐项通过下面七道硬门槛。
-C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该被选”的证据。只要任意一道不能确定通过，就从selected删除。
+C. 对暂定的proposed做一次反证复核：主动寻找“为什么它不该被提名”的证据。你如实填写checks，不得用reason改变门槛结果。
 
 七道硬门槛（必须全部通过）：
 1. 直接考查：正确解答当前设问确实需要该Label；仅出现于材料、父题背景、工具名或弱联想不通过。错误选项只有在判断其错误必须调用该知识时才算直接考查。
@@ -198,11 +230,11 @@ Label名称字面成立测试（选择前必做）：
 选择规则：
 8. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
 9. 合理多标可以保留，但每一个Label都必须独立通过全部七道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
-10. 每个selected都必须提供一条可机器校验的evidence：source只能是parent_stem、stem、options、answer_text或analysis，quote必须是该字段中连续复制的简短原文。它必须同时证明考点和Label限定的对象、层级或作用通道。找不到就不得选择。
-11. 题目有明确生物考点，但没有任何候选能通过七道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
+10. 每个proposed都必须提供一条可机器校验的evidence：source只能是parent_stem、stem、options、answer_text或analysis，quote必须是该字段中连续复制的简短原文。
+11. 题目有明确生物考点，但没有任何候选值得提名时，proposed=[]且need_expand_recall=true。宁可置空，不得提名“最接近”的替代Label。
 12. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
-13. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。因此selected非空时context_insufficient必须为false；缺失内容只影响其他潜在Label时，保留已确定Label即可。
-14. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
+13. 仅当缺图或缺父题材料导致连一个可靠Label都无法提名时，才设context_insufficient=true。因此proposed非空时context_insufficient必须为false。
+14. 非生物题或无有效设问：proposed=[]，checks={{}}，need_expand_recall=false，context_insufficient=false。
 
 只能返回C01等短代码，不能抄写长label_id。
 
@@ -222,8 +254,8 @@ def validate_adjudication_result(
 ) -> dict[str, Any]:
     required = (
         "reason",
-        "selected",
-        "evidence",
+        "proposed",
+        "checks",
         "need_expand_recall",
         "context_insufficient",
     )
@@ -263,37 +295,127 @@ def validate_adjudication_result(
     reason = reason.strip()
     if len(reason) > 1000:
         raise ValueError("reason is too long")
-    normalized = normalize_codes("selected")
-    raw_evidence = value["evidence"]
-    if not isinstance(raw_evidence, dict):
-        raise ValueError("evidence must be an object keyed by selected code")
-    normalized_evidence: dict[str, dict[str, str]] = {}
-    for code in normalized:
-        evidence = raw_evidence.get(code)
+
+    proposed = normalize_codes("proposed")
+    raw_checks = value["checks"]
+    if not isinstance(raw_checks, dict):
+        raise ValueError("checks must be an object keyed by proposed code")
+
+    def normalize_evidence(
+        evidence: Any, *, code: str, field: str, required: bool
+    ) -> dict[str, str] | None:
+        if evidence is None and not required:
+            return None
         if not isinstance(evidence, dict):
-            raise ValueError(f"missing evidence object for {code}")
+            raise ValueError(f"missing {field} object for {code}")
         source = evidence.get("source")
         quote = evidence.get("quote")
         if source not in EVIDENCE_SOURCES:
-            raise ValueError(f"invalid evidence source for {code}")
+            raise ValueError(f"invalid {field} source for {code}")
         if not isinstance(quote, str) or not quote.strip():
-            raise ValueError(f"missing non-empty evidence quote for {code}")
+            raise ValueError(f"missing non-empty {field} quote for {code}")
         quote = quote.strip()
         if len(quote) > 300:
-            raise ValueError(f"evidence for {code} is too long")
-        normalized_evidence[code] = {"source": source, "quote": quote}
-    context_forced_false = bool(normalized and value["context_insufficient"])
+            raise ValueError(f"{field} for {code} is too long")
+        return {"source": source, "quote": quote}
+
+    normalized_checks: dict[str, dict[str, Any]] = {}
+    selected: list[str] = []
+    gate_rejected_codes: dict[str, list[str]] = {}
+    for code in proposed:
+        check = raw_checks.get(code)
+        if not isinstance(check, dict):
+            raise ValueError(f"missing checks object for {code}")
+        literal_relation = check.get("literal_relation")
+        scope_kind = check.get("scope_kind")
+        object_match = check.get("object_match")
+        mechanism_relation = check.get("mechanism_relation")
+        if literal_relation not in {"EXACT", "ANALOGY_ONLY", "FALSE"}:
+            raise ValueError(f"invalid literal_relation for {code}")
+        if scope_kind not in {"GENERIC", "RESTRICTED"}:
+            raise ValueError(f"invalid scope_kind for {code}")
+        if object_match not in {"EXACT", "NOT_APPLICABLE", "MISMATCH"}:
+            raise ValueError(f"invalid object_match for {code}")
+        if mechanism_relation not in {"DIRECT", "SHARED_ONLY", "BACKGROUND"}:
+            raise ValueError(f"invalid mechanism_relation for {code}")
+        if not isinstance(check.get("dimension_match"), bool):
+            raise ValueError(f"dimension_match must be boolean for {code}")
+        if not isinstance(check.get("necessary"), bool):
+            raise ValueError(f"necessary must be boolean for {code}")
+        anchors = check.get("scope_anchors")
+        if not isinstance(anchors, list) or any(
+            not isinstance(anchor, str) or not anchor.strip() for anchor in anchors
+        ):
+            raise ValueError(f"scope_anchors must be non-empty strings for {code}")
+        anchors = list(dict.fromkeys(anchor.strip() for anchor in anchors))
+        evidence = normalize_evidence(
+            check.get("evidence"), code=code, field="evidence", required=True
+        )
+        object_evidence = normalize_evidence(
+            check.get("object_evidence"),
+            code=code,
+            field="object_evidence",
+            required=scope_kind == "RESTRICTED",
+        )
+        normalized_check = {
+            "literal_relation": literal_relation,
+            "scope_kind": scope_kind,
+            "scope_anchors": anchors,
+            "object_match": object_match,
+            "object_evidence": object_evidence,
+            "mechanism_relation": mechanism_relation,
+            "dimension_match": check["dimension_match"],
+            "necessary": check["necessary"],
+            "evidence": evidence,
+        }
+        normalized_checks[code] = normalized_check
+
+        failures: list[str] = []
+        if literal_relation != "EXACT":
+            failures.append("literal_relation")
+        if scope_kind == "GENERIC":
+            if anchors:
+                failures.append("generic_scope_has_anchors")
+            if object_match != "NOT_APPLICABLE":
+                failures.append("generic_object_match")
+            if object_evidence is not None:
+                failures.append("generic_object_evidence")
+        else:
+            if not anchors:
+                failures.append("restricted_scope_missing_anchors")
+            if object_match != "EXACT":
+                failures.append("restricted_object_mismatch")
+            if object_evidence is None:
+                failures.append("restricted_object_evidence")
+        if mechanism_relation != "DIRECT":
+            failures.append("mechanism_relation")
+        if not check["dimension_match"]:
+            failures.append("dimension_match")
+        if not check["necessary"]:
+            failures.append("necessary")
+        if failures:
+            gate_rejected_codes[code] = failures
+        else:
+            selected.append(code)
+
+    normalized_evidence = {
+        code: normalized_checks[code]["evidence"] for code in selected
+    }
+    context_forced_false = bool(selected and value["context_insufficient"])
     return {
         "reason": reason,
-        "selected": normalized,
+        "proposed": proposed,
+        "checks": normalized_checks,
+        "selected": selected,
         "evidence": normalized_evidence,
+        "gate_rejected_codes": gate_rejected_codes,
         "unknown_selected_codes_dropped": unknown_codes,
         "context_insufficient": False
-        if normalized
+        if selected
         else value["context_insufficient"],
         "context_insufficient_forced_false": context_forced_false,
         "need_expand_recall": value["need_expand_recall"] or bool(unknown_codes),
-        "none_of_candidates": not bool(normalized),
+        "none_of_candidates": not bool(selected),
     }
 
 
@@ -324,6 +446,7 @@ def run_adjudication(
     *,
     model: str,
     limit: int | None = None,
+    question_ids: set[str] | None = None,
     max_tokens: int = 1024,
     workers: int = 1,
 ) -> dict[str, Any]:
@@ -332,6 +455,18 @@ def run_adjudication(
     if workers < 1:
         raise ValueError("workers must be positive")
     units = _read_jsonl(units_path)
+    if question_ids is not None:
+        units = [
+            unit
+            for unit in units
+            if str(unit.get("question_id") or "") in question_ids
+        ]
+        found_ids = {str(unit.get("question_id") or "") for unit in units}
+        missing_requested = sorted(question_ids - found_ids)
+        if missing_requested:
+            raise ValueError(
+                f"question_id not found in units: {missing_requested[0]}"
+            )
     if limit is not None:
         units = units[:limit]
     candidate_rows = {
@@ -367,6 +502,7 @@ def run_adjudication(
         "prompt_version": prompt_version,
         "model": model,
         "limit": limit,
+        "question_ids": sorted(question_ids) if question_ids is not None else None,
         "max_tokens": max_tokens,
         "input_paths": {
             "units": str(Path(units_path)),
@@ -529,6 +665,9 @@ def run_adjudication(
     context_insufficient_forced_false_count = 0
     unverified_evidence_items = 0
     questions_with_unverified_evidence = 0
+    gate_rejected_label_count = 0
+    questions_with_gate_rejections = 0
+    gate_rejection_reasons: Counter[str] = Counter()
     unknown_selected_codes_dropped_count = 0
     questions_with_unknown_selected_codes = 0
     usable_for_training_count = 0
@@ -553,10 +692,86 @@ def run_adjudication(
             used_rank_21_plus = False
             used_rank_26_30 = False
             used_unverified_evidence = False
+            gate_rejected_labels = []
+            for code, reasons in parsed.get("gate_rejected_codes", {}).items():
+                label_id = code_map[code]
+                label = labels_by_id[label_id]
+                gate_rejected_labels.append(
+                    {
+                        "label_id": label_id,
+                        "label_name": label.get("label_name", ""),
+                        "code": code,
+                        "reasons": reasons,
+                        "stage": "structured_checks",
+                        "checks": parsed["checks"].get(code, {}),
+                    }
+                )
+                gate_rejected_label_count += 1
+                gate_rejection_reasons.update(reasons)
             for code in parsed["selected"]:
                 label_id = code_map[code]
                 label = labels_by_id[label_id]
                 candidate = candidates_by_id[label_id]
+                check = parsed["checks"][code]
+                evidence = parsed["evidence"][code]
+                evidence_source = evidence["source"]
+                evidence_quote = evidence["quote"]
+                source_text = str(unit.get(evidence_source) or "")
+                evidence_verified = bool(_normalize_evidence_text(evidence_quote)) and (
+                    _normalize_evidence_text(evidence_quote)
+                    in _normalize_evidence_text(source_text)
+                )
+                verification_failures = []
+                if not evidence_verified:
+                    verification_failures.append("evidence_not_verbatim")
+                object_evidence = check.get("object_evidence")
+                object_evidence_verified = True
+                scope_anchors_verified = True
+                if check["scope_kind"] == "RESTRICTED":
+                    normalized_label_name = _normalize_evidence_text(
+                        label.get("label_name", "")
+                    )
+                    normalized_anchors = [
+                        _normalize_evidence_text(anchor)
+                        for anchor in check["scope_anchors"]
+                    ]
+                    scope_anchors_verified = bool(normalized_anchors) and all(
+                        len(anchor) >= 2 and anchor in normalized_label_name
+                        for anchor in normalized_anchors
+                    )
+                    if not scope_anchors_verified:
+                        verification_failures.append("scope_anchor_not_in_label_name")
+                    object_source = object_evidence["source"]
+                    object_quote = object_evidence["quote"]
+                    object_source_text = str(unit.get(object_source) or "")
+                    normalized_object_quote = _normalize_evidence_text(object_quote)
+                    object_evidence_verified = bool(normalized_object_quote) and (
+                        normalized_object_quote
+                        in _normalize_evidence_text(object_source_text)
+                    ) and any(
+                        anchor in normalized_object_quote
+                        for anchor in normalized_anchors
+                    )
+                    if not object_evidence_verified:
+                        verification_failures.append("object_evidence_scope_mismatch")
+                used_unverified_evidence = (
+                    used_unverified_evidence or bool(verification_failures)
+                )
+                unverified_evidence_items += len(verification_failures)
+                if verification_failures:
+                    gate_rejected_labels.append(
+                        {
+                            "label_id": label_id,
+                            "label_name": label.get("label_name", ""),
+                            "code": code,
+                            "reasons": verification_failures,
+                            "stage": "evidence_verification",
+                            "checks": check,
+                        }
+                    )
+                    gate_rejected_label_count += 1
+                    gate_rejection_reasons.update(verification_failures)
+                    continue
                 rank = int(candidate.get("candidate_rank") or candidate.get("rank") or 0)
                 if rank > 0:
                     selected_rank_distribution[str(rank)] += 1
@@ -567,18 +782,6 @@ def run_adjudication(
                 selected_from_rank_21_plus += int(rank >= 21)
                 used_rank_26_30 = used_rank_26_30 or 26 <= rank <= 30
                 selected_from_rank_26_30 += int(26 <= rank <= 30)
-                evidence = parsed["evidence"][code]
-                evidence_source = evidence["source"]
-                evidence_quote = evidence["quote"]
-                source_text = str(unit.get(evidence_source) or "")
-                evidence_verified = bool(_normalize_evidence_text(evidence_quote)) and (
-                    _normalize_evidence_text(evidence_quote)
-                    in _normalize_evidence_text(source_text)
-                )
-                used_unverified_evidence = (
-                    used_unverified_evidence or not evidence_verified
-                )
-                unverified_evidence_items += int(not evidence_verified)
                 selected_labels.append(
                     {
                         "label_id": label_id,
@@ -591,6 +794,14 @@ def run_adjudication(
                         "evidence_source": evidence_source,
                         "evidence": evidence_quote,
                         "evidence_verified": evidence_verified,
+                        "scope_kind": check["scope_kind"],
+                        "scope_anchors": check["scope_anchors"],
+                        "literal_relation": check["literal_relation"],
+                        "mechanism_relation": check["mechanism_relation"],
+                        "dimension_match": check["dimension_match"],
+                        "necessary": check["necessary"],
+                        "object_evidence": object_evidence,
+                        "object_evidence_verified": object_evidence_verified,
                     }
                 )
             selected_labels.sort(
@@ -600,9 +811,10 @@ def run_adjudication(
             questions_using_rank_21_plus += int(used_rank_21_plus)
             questions_using_rank_26_30 += int(used_rank_26_30)
             questions_with_unverified_evidence += int(used_unverified_evidence)
+            questions_with_gate_rejections += int(bool(gate_rejected_labels))
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
-            none_count += int(parsed["none_of_candidates"])
+            none_count += int(not selected_labels)
             context_insufficient_count += int(parsed["context_insufficient"])
             context_insufficient_forced_false_count += int(
                 parsed.get("context_insufficient_forced_false", False)
@@ -643,10 +855,12 @@ def run_adjudication(
                 "unit_type": unit.get("unit_type", ""),
                 "reason": parsed["reason"],
                 "selected_labels": selected_labels,
+                "proposed_codes": parsed.get("proposed", []),
+                "gate_rejected_labels": gate_rejected_labels,
                 "unknown_selected_codes_dropped": parsed.get(
                     "unknown_selected_codes_dropped", []
                 ),
-                "none_of_candidates": parsed["none_of_candidates"],
+                "none_of_candidates": not bool(selected_labels),
                 "need_expand_recall": parsed["need_expand_recall"],
                 "context_insufficient": parsed["context_insufficient"],
                 "text_content_missing": text_content_missing,
@@ -803,6 +1017,9 @@ def run_adjudication(
         "context_insufficient_forced_false": context_insufficient_forced_false_count,
         "unverified_evidence_items": unverified_evidence_items,
         "questions_with_unverified_evidence": questions_with_unverified_evidence,
+        "gate_rejected_label_count": gate_rejected_label_count,
+        "questions_with_gate_rejections": questions_with_gate_rejections,
+        "gate_rejection_reasons": dict(sorted(gate_rejection_reasons.items())),
         "unknown_selected_codes_dropped": unknown_selected_codes_dropped_count,
         "questions_with_unknown_selected_codes": questions_with_unknown_selected_codes,
         "usable_for_training": usable_for_training_count,

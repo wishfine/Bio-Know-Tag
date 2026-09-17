@@ -53,6 +53,40 @@ def _candidate(index: int) -> dict:
     }
 
 
+def _generic_check(*, source: str = "stem", quote: str = "题干") -> dict:
+    return {
+        "literal_relation": "EXACT",
+        "scope_kind": "GENERIC",
+        "scope_anchors": [],
+        "object_match": "NOT_APPLICABLE",
+        "object_evidence": None,
+        "mechanism_relation": "DIRECT",
+        "dimension_match": True,
+        "necessary": True,
+        "evidence": {"source": source, "quote": quote},
+    }
+
+
+def _model_value(
+    codes: list[str],
+    *,
+    reason: str = "根据题目证据作出判断。",
+    expand: bool = False,
+    context: bool = False,
+    source: str = "stem",
+    quote: str = "题干",
+) -> dict:
+    return {
+        "reason": reason,
+        "proposed": codes,
+        "checks": {
+            code: _generic_check(source=source, quote=quote) for code in codes
+        },
+        "need_expand_recall": expand,
+        "context_insufficient": context,
+    }
+
+
 def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, code_map = build_adjudication_prompt(
@@ -69,14 +103,14 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
     assert "合理多标可以保留" in prompt
-    assert "可以少选、置空或扩召" in prompt
+    assert "可以少提名、置空或扩召" in prompt
     assert "删除测试" not in prompt
     assert '"parent_context_missing": false' in prompt
     assert '"image_context_missing": false' in prompt
     assert '"context_insufficient": false' in prompt
     assert "rejected_close_codes" not in prompt
     assert '"necessity"' not in prompt
-    assert '"reason": "当前设问直接考查……"' in prompt
+    assert '"reason": "简要说明题目实际考查什么' in prompt
     assert '"none_of_candidates"' not in prompt
     assert '"missing_knowledge"' not in prompt
 
@@ -121,17 +155,17 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v92_prompt_requires_literal_name_and_anchored_evidence():
+def test_v10_prompt_delegates_final_selection_to_structured_hard_gates():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v9.2-literal-name-anchored-evidence"
+    assert PROMPT_VERSION == "candidate-adjudication-v10-structured-hard-gates"
     assert "错标的代价远高于漏标" in prompt
     assert "七道硬门槛" in prompt
     assert "反证复核" in prompt
-    assert "只要任意一道不能确定通过" in prompt
+    assert "你如实填写checks" in prompt
     assert "不得因为研究对象、题干关键词或所属章节相同" in prompt
     assert "对象与限定词" in prompt
     assert "生命层级与作用通道" in prompt
@@ -153,13 +187,18 @@ def test_v92_prompt_requires_literal_name_and_anchored_evidence():
     assert "Label名称字面成立测试" in prompt
     assert "本题直接考查【label_name】" in prompt
     assert "类比、类似、共享机制、可迁移、属于同类" in prompt
-    assert "selected非空时context_insufficient必须为false" in prompt
-    assert "reason用1至2句话、不超过120字" in prompt
-    assert '"reason": "当前设问直接考查……"' in prompt
-    assert '"selected": ["C01", "C05"]' in prompt
+    assert "proposed非空时context_insufficient必须为false" in prompt
+    assert "reason无权修改checks" in prompt
+    assert '"reason": "简要说明题目实际考查什么' in prompt
+    assert '"proposed": ["C01", "C05"]' in prompt
+    assert '"literal_relation": "EXACT"' in prompt
+    assert '"scope_kind": "RESTRICTED"' in prompt
+    assert '"mechanism_relation": "DIRECT"' in prompt
+    assert "你不拥有最终选择权" in prompt
+    assert "不输出selected或KEEP/REJECT" in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
-    assert schema.index('"selected"') < schema.index('"evidence"')
-    assert schema.index('"evidence"') < schema.index('"context_insufficient"')
+    assert schema.index('"proposed"') < schema.index('"checks"')
+    assert schema.index('"checks"') < schema.index('"context_insufficient"')
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert schema.index('"need_expand_recall"') < schema.index('"reason"')
     assert '"source": "stem"' in prompt
@@ -204,13 +243,12 @@ def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "解析中存在相关知识。",
-                "selected": ["C01"],
-                "evidence": {"C01": {"source": "analysis", "quote": "解析"}},
-                "need_expand_recall": False,
-                "context_insufficient": False,
-            },
+            _model_value(
+                ["C01"],
+                reason="解析中存在相关知识。",
+                source="analysis",
+                quote="解析",
+            ),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -263,18 +301,16 @@ def test_prompt_restores_single_v83_question_object():
     )
 
 
-def test_validate_v92_adjudication_accepts_anchored_evidence_and_codes():
+def test_validate_v10_adjudication_computes_selected_from_passing_checks():
+    value = _model_value(
+        ["C02", "C01", "C02"],
+        reason="当前设问直接考查标签一和标签二。",
+    )
+    value["checks"]["C02"] = _generic_check(
+        source="answer_text", quote="答案"
+    )
     result = validate_adjudication_result(
-        {
-            "reason": "当前设问直接考查标签一和标签二。",
-            "selected": ["C02", "C01", "C02"],
-            "evidence": {
-                "C01": {"source": "stem", "quote": "题干"},
-                "C02": {"source": "answer_text", "quote": "答案"},
-            },
-            "need_expand_recall": False,
-            "context_insufficient": False,
-        },
+        value,
         {"C01", "C02"},
     )
 
@@ -289,29 +325,45 @@ def test_validate_v92_adjudication_accepts_anchored_evidence_and_codes():
     with pytest.raises(ValueError, match="short codes"):
         validate_adjudication_result(
             {
-                "reason": "理由",
-                "selected": [{"code": "C01", "evidence": "题干"}],
-                "evidence": {"C01": {"source": "stem", "quote": "题干"}},
-                "need_expand_recall": False,
-                "context_insufficient": False,
+                **_model_value([]),
+                "proposed": [{"code": "C01", "evidence": "题干"}],
             },
             {"C01"},
         )
 
 
-def test_validate_adjudication_derives_empty_state():
-    valid = {
-        "reason": "理由",
-        "selected": ["C01"],
-        "evidence": {"C01": {"source": "stem", "quote": "题干"}},
-        "need_expand_recall": False,
-        "context_insufficient": False,
+def test_validate_v10_hard_rejects_analogy_and_object_mismatch():
+    value = _model_value(["C01"])
+    value["checks"]["C01"] = {
+        "literal_relation": "ANALOGY_ONLY",
+        "scope_kind": "RESTRICTED",
+        "scope_anchors": ["人类", "红绿色盲症"],
+        "object_match": "MISMATCH",
+        "object_evidence": {"source": "analysis", "quote": "果蝇白眼"},
+        "mechanism_relation": "SHARED_ONLY",
+        "dimension_match": True,
+        "necessary": False,
+        "evidence": {"source": "analysis", "quote": "果蝇白眼"},
     }
+
+    result = validate_adjudication_result(value, {"C01"})
+
+    assert result["selected"] == []
+    assert result["gate_rejected_codes"]["C01"] == [
+        "literal_relation",
+        "restricted_object_mismatch",
+        "mechanism_relation",
+        "necessary",
+    ]
+
+
+def test_validate_adjudication_derives_empty_state():
+    valid = _model_value(["C01"], reason="理由")
     assert validate_adjudication_result(valid, {"C01", "C02"})["selected"] == [
         "C01"
     ]
     empty = validate_adjudication_result(
-        {**valid, "selected": [], "evidence": {}},
+        _model_value([], reason="理由"),
         {"C01", "C02"},
     )
     assert empty["none_of_candidates"] is True
@@ -321,26 +373,18 @@ def test_validate_adjudication_derives_empty_state():
 def test_validate_adjudication_requires_nonempty_string_reason(reason):
     with pytest.raises(ValueError, match="reason"):
         validate_adjudication_result(
-            {
-                "reason": reason,
-                "selected": [],
-                "evidence": {},
-                "need_expand_recall": True,
-                "context_insufficient": False,
-            },
+            _model_value([], reason=reason, expand=True),
             {"C01"},
         )
 
 
 def test_validate_adjudication_drops_unknown_answer_code_when_expanding_recall():
     result = validate_adjudication_result(
-        {
-            "selected": ["D09"],
-            "evidence": {"D09": {"source": "stem", "quote": "题干"}},
-            "context_insufficient": False,
-            "need_expand_recall": True,
-            "reason": "正确知识点不在候选中，需要扩召。",
-        },
+        _model_value(
+            ["D09"],
+            expand=True,
+            reason="正确知识点不在候选中，需要扩召。",
+        ),
         {"C01", "C02"},
     )
 
@@ -351,13 +395,7 @@ def test_validate_adjudication_drops_unknown_answer_code_when_expanding_recall()
 
 def test_validate_adjudication_safely_drops_unknown_code_and_forces_expansion():
     result = validate_adjudication_result(
-        {
-            "selected": ["D09"],
-            "evidence": {"D09": {"source": "stem", "quote": "题干"}},
-            "context_insufficient": False,
-            "need_expand_recall": False,
-            "reason": "选择D09。",
-        },
+        _model_value(["D09"], reason="选择D09。"),
         {"C01", "C02"},
     )
 
@@ -392,22 +430,17 @@ def test_validate_adjudication_safely_drops_unknown_code_and_forces_expansion():
 def test_validate_adjudication_candidate_and_context_states(
     selected, expand, context, valid
 ):
-    value = {
-        "reason": "简短理由",
-        "selected": selected,
-        "evidence": {
-            code: {"source": "stem", "quote": "题干"}
-            for code in selected
-            if isinstance(code, str)
-        }
-        if isinstance(selected, list)
-        else {},
-        "need_expand_recall": expand,
-        "context_insufficient": context,
-    }
+    value = _model_value(
+        selected if isinstance(selected, list) else [],
+        reason="简短理由",
+        expand=expand,
+        context=context,
+    )
+    if not isinstance(selected, list):
+        value["proposed"] = selected
     if valid:
         result = validate_adjudication_result(value, {"C01"})
-        assert result["context_insufficient"] is context
+        assert result["context_insufficient"] is (context and not bool(selected))
     else:
         with pytest.raises(ValueError):
             validate_adjudication_result(value, {"C01"})
@@ -452,15 +485,9 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "当前题目直接考查标签28。",
-                "selected": [code_for_l28],
-                "evidence": {
-                    code_for_l28: {"source": "stem", "quote": "题干"}
-                },
-                "need_expand_recall": False,
-                "context_insufficient": False,
-            },
+            _model_value(
+                [code_for_l28], reason="当前题目直接考查标签28。"
+            ),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -576,13 +603,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "当前题目直接考查标签1。",
-                "selected": ["C01"],
-                "evidence": {"C01": {"source": "stem", "quote": "题干"}},
-                "need_expand_recall": False,
-                "context_insufficient": False,
-            },
+            _model_value(["C01"], reason="当前题目直接考查标签1。"),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -623,6 +644,56 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
     assert client.max_active == 2
 
 
+def test_run_adjudication_can_filter_one_question_id(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units = [{**_unit(), "question_id": question_id} for question_id in ("q1", "q2")]
+    units_path.write_text(
+        "".join(json.dumps(unit, ensure_ascii=False) + "\n" for unit in units),
+        encoding="utf-8",
+    )
+    candidates_path.write_text(
+        "".join(
+            json.dumps(
+                {"question_id": unit["question_id"], "candidates": [_candidate(1)]}
+            )
+            + "\n"
+            for unit in units
+        ),
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = json.dumps(_model_value(["C01"]), ensure_ascii=False)
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+        question_ids={"q2"},
+    )
+    prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
+
+    assert report["input"] == 1
+    assert prediction["question_id"] == "q2"
+
+
 def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path):
     units_path = tmp_path / "units.jsonl"
     candidates_path = tmp_path / "candidates.jsonl"
@@ -650,13 +721,7 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "当前题目直接考查标签1。",
-                "selected": ["C01"],
-                "evidence": {"C01": {"source": "stem", "quote": "题干"}},
-                "need_expand_recall": False,
-                "context_insufficient": False,
-            },
+            _model_value(["C01"], reason="当前题目直接考查标签1。"),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -728,16 +793,7 @@ def test_run_adjudication_filters_risky_training_rows(
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "根据题目证据作出判断。",
-                "selected": selected,
-                "evidence": {
-                    code: {"source": "stem", "quote": "题干"}
-                    for code in selected
-                },
-                "need_expand_recall": expand,
-                "context_insufficient": context,
-            },
+            _model_value(selected, expand=expand, context=context),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -784,13 +840,9 @@ def test_run_adjudication_normalizes_context_conflict_when_label_is_safe(
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "题干直接支持标签1。",
-                "selected": ["C01"],
-                "evidence": {"C01": {"source": "stem", "quote": "题干"}},
-                "need_expand_recall": False,
-                "context_insufficient": True,
-            },
+            _model_value(
+                ["C01"], reason="题干直接支持标签1。", context=True
+            ),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -833,15 +885,11 @@ def test_run_adjudication_filters_non_verbatim_evidence(tmp_path: Path):
 
     class Response:
         content = json.dumps(
-            {
-                "reason": "模型改写了证据。",
-                "selected": ["C01"],
-                "evidence": {
-                    "C01": {"source": "stem", "quote": "题干中不存在的推断"}
-                },
-                "need_expand_recall": False,
-                "context_insufficient": False,
-            },
+            _model_value(
+                ["C01"],
+                reason="模型改写了证据。",
+                quote="题干中不存在的推断",
+            ),
             ensure_ascii=False,
         )
         endpoint = "fake"
@@ -862,12 +910,71 @@ def test_run_adjudication_filters_non_verbatim_evidence(tmp_path: Path):
     )
     prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
 
-    assert prediction["selected_labels"][0]["evidence_verified"] is False
+    assert prediction["selected_labels"] == []
+    assert prediction["gate_rejected_labels"][0]["reasons"] == [
+        "evidence_not_verbatim"
+    ]
     assert prediction["needs_review"] is True
     assert prediction["usable_for_training"] is False
     assert report["unverified_evidence_items"] == 1
     assert report["questions_with_unverified_evidence"] == 1
     assert report["training_filter_reasons"]["unverified_evidence"] == 1
+
+
+def test_v10_rejects_restricted_label_when_object_quote_lacks_scope_anchor(
+    tmp_path: Path,
+):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    unit = {**_unit(), "analysis": "果蝇白眼属于伴X隐性遗传"}
+    units_path.write_text(json.dumps(unit, ensure_ascii=False) + "\n", encoding="utf-8")
+    candidates_path.write_text(
+        json.dumps({"question_id": "q1", "candidates": [_candidate(1)]}) + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "人类红绿色盲症"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    value = _model_value(["C01"], source="analysis", quote="果蝇白眼")
+    value["checks"]["C01"].update(
+        {
+            "scope_kind": "RESTRICTED",
+            "scope_anchors": ["人类", "红绿色盲症"],
+            "object_match": "EXACT",
+            "object_evidence": {"source": "analysis", "quote": "果蝇白眼"},
+        }
+    )
+
+    class Response:
+        content = json.dumps(value, ensure_ascii=False)
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+    )
+    prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
+
+    assert prediction["selected_labels"] == []
+    assert prediction["gate_rejected_labels"][0]["reasons"] == [
+        "object_evidence_scope_mismatch"
+    ]
+    assert report["gate_rejection_reasons"] == {
+        "object_evidence_scope_mismatch": 1
+    }
 
 
 def test_run_adjudication_records_terminal_request_diagnostics(tmp_path: Path):
