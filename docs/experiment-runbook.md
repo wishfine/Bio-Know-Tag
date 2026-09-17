@@ -1570,6 +1570,36 @@ printf 'V91B_LEGACY_RUN=%s PID=%s\n' "$V91B_LEGACY_RUN" "$PID"
 
 验收时要求`prompt_version=candidate-adjudication-v9.1b-compact-hard-boundaries`。报告中的`audited_exclusion_questions`/`audited_excluded_labels`记录确定性排除；命中规则的题进入`training_filter_reasons.audited_exclusion`，不进训练集。
 
+### 25.1 独立Definition Judge
+
+`definition-verifier-v1-independent`是V9.1b之后的独立二次复核。它只接收当前题和第一阶段选中的Label，但不接收第一阶段reason、`core_concepts`、召回来源、排名或分数。它只用`definition + distinctions`对每个Label独立输出T/F，用于减少第一阶段“先选中、再为自己找理由”的自我合理化。
+
+```bash
+DEFINITION_VERIFY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-verifier"
+mkdir -p "$DEFINITION_VERIFY_RUN"
+
+nohup env PYTHONPATH=src python scripts/run_definition_verifier.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --stage1-predictions "$V91B_LEGACY_RUN/predictions.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$DEFINITION_VERIFY_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 1024 \
+  > "$DEFINITION_VERIFY_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$DEFINITION_VERIFY_RUN/pid"
+printf '%s\n' "$DEFINITION_VERIFY_RUN" > runtime/LATEST_DEFINITION_VERIFIER_RUN
+```
+
+复核结果在`predictions.jsonl`中保留`stage1_reason`，将未通过定义契约的Label写入`definition_rejected_labels`。若所有Label都被拒绝，则`usable_for_training=false`且`needs_review=true`；部分被拒绝时可保留通过的Label。
+
 ## 26. 生物Label释义覆盖实验（每Label最多500题）
 
 ### 26.1 合并长尾更新数据
