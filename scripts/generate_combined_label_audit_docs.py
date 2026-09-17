@@ -205,6 +205,9 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
     positive = {str(row["label_id"]): row for row in read_jsonl(args.positive_per_label)}
     negative = {str(row["label_id"]): row for row in read_jsonl(args.negative_per_label)}
     combined = {str(row["label_id"]): row for row in read_jsonl(args.combined)}
+    corrected = {
+        str(row["label_id"]): row for row in read_jsonl(args.corrected_assessments)
+    }
     tasks = {str(row["pair_id"]): row for row in read_jsonl(args.positive_tasks)}
     positive_results_by_label: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in read_jsonl(args.positive_results):
@@ -217,8 +220,14 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
     for row in read_jsonl(args.confusion_pairs):
         confusion_by_target[str(row["target_label_id"])].append(row)
 
-    if set(labels) != set(positive) or set(labels) != set(combined):
-        raise ValueError("Label, positive, and combined inputs must cover the same 458 IDs")
+    if (
+        set(labels) != set(positive)
+        or set(labels) != set(combined)
+        or set(labels) != set(corrected)
+    ):
+        raise ValueError(
+            "Label, positive, combined, and corrected inputs must cover the same 458 IDs"
+        )
     if set(samples) != {
         str(row["task_id"])
         for rows in negative_results_by_label.values()
@@ -241,6 +250,7 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
                 "positive": positive[label_id],
                 "negative": neg,
                 "combined": combined[label_id],
+                "corrected": corrected[label_id],
                 "category": category,
                 "conclusion": conclusion,
                 "pairs": pairs,
@@ -322,6 +332,61 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
         ):
             positive_problem_totals[key] += int(bands[key])
 
+    positive_problem_ids = {
+        str(item["label"]["label_id"]) for item in positive_problem_items
+    }
+    corrected_screen_counts = Counter(
+        item["corrected"]["final_screen"] for item in items
+    )
+    corrected_totals = Counter()
+    for item in items:
+        row = item["corrected"]
+        for key in (
+            "hard_negative_total",
+            "first_stage_accepted",
+            "first_stage_rejected",
+            "invalid_sibling_negatives",
+            "unresolved",
+            "valid_negative_count",
+            "true_boundary_errors",
+        ):
+            corrected_totals[key] += int(row[key])
+    corrected_totals["reasonable_colabel"] = sum(
+        int((item["corrected"].get("colabel_decision_counts") or {}).get("合理共标", 0))
+        for item in items
+    )
+    corrected_totals["source_insufficient"] = sum(
+        int(
+            (item["corrected"].get("colabel_decision_counts") or {}).get(
+                "来源Label不足以描述该题", 0
+            )
+        )
+        for item in items
+    )
+    corrected_totals["neither_sufficient"] = sum(
+        int(
+            (item["corrected"].get("colabel_decision_counts") or {}).get(
+                "两侧Label均不充分", 0
+            )
+        )
+        for item in items
+    )
+    additional_boundary_items = [
+        item
+        for item in items
+        if str(item["label"]["label_id"]) not in positive_problem_ids
+        and int(item["corrected"]["positive_count"]) >= 300
+        and int(item["corrected"]["valid_negative_count"]) >= 20
+        and item["corrected"].get("corrected_boundary_error_rate") is not None
+        and float(item["corrected"]["corrected_boundary_error_rate"]) > 0.15
+    ]
+    additional_boundary_items.sort(
+        key=lambda item: (
+            -float(item["corrected"]["corrected_boundary_error_rate"]),
+            str(item["label"]["label_name"]),
+        )
+    )
+
     full = [
         "# 高中生物458个Label正负样本联合复核",
         "",
@@ -330,14 +395,32 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
         "- 正样本：179,568个独立题—历史Label对，检验当前释义对历史已打题的覆盖。",
         "- 硬负样本：21,647个“高置信兄弟Label正题→目标Label”对，检验兄弟边界排除能力。",
         "- 硬负样本不是金标负例：兄弟Label可能合理共标，尤其是综合、比较、上位和信息形式Label。",
-        "- 因此本文使用“兄弟题接受率”，不把25.66%整体接受率直接称为错标率。",
+        "- 第一阶段只测“兄弟题接受率”；对接受的5,555条再做V2匿名候选最小充分集合二次Judge。",
+        "- V2仍是DS Judge证据，且“最小充分集合”比业务可接受的合理多标更严。因此校正指标称为“目标Label排除率”，不直接称为人工金标错标率。",
         "",
         "## 总体结果",
         "",
         "- 正样本match：68.53%。",
-        "- 兄弟硬负题接受：5,555/21,647（25.66%）。",
-        "- 硬负样本覆盖440/458个Label；18个Label无可用兄弟负样本。",
-        "- 硬负样本按目标Label分层：150个≤5%，88个5%–15%，63个15%–30%，139个>30%。",
+        f"- 第一阶段兄弟题接受：{corrected_totals['first_stage_accepted']:,}/{corrected_totals['hard_negative_total']:,}（{corrected_totals['first_stage_accepted'] / corrected_totals['hard_negative_total']:.2%}）。",
+        f"- V2二次裁决：合理共标{corrected_totals['reasonable_colabel']:,}；来源Label不足{corrected_totals['source_insufficient']:,}；两侧都不充分{corrected_totals['neither_sufficient']:,}；目标Label被最小集合排除{corrected_totals['true_boundary_errors']:,}；无法判断{corrected_totals['unresolved']:,}。",
+        f"- 移除{corrected_totals['invalid_sibling_negatives']:,}条伪负例后，有效负样本{corrected_totals['valid_negative_count']:,}，目标Label排除{corrected_totals['true_boundary_errors']:,}，校正排除率{corrected_totals['true_boundary_errors'] / corrected_totals['valid_negative_count']:.2%}。",
+        "",
+        "## 正样本分档策略",
+        "",
+        "正样本分档只回答“当前老师释义能否覆盖历史已打Label的独立题”，不能判定释义是否偏宽。规则按以下顺序命中：",
+        "",
+        "| 分档 | 规则 | 含义 |",
+        "|---|---|---|",
+        "| P0_图谱冲突 | 既有策略状态为`taxonomy_hold` | Label名与释义/taxonomy冲突，暂停自动定标 |",
+        "| L0_极端长尾 | 正样本<30 | 比例不稳定，应逐题看 |",
+        "| L1_长尾异常 | 30–299题，且match<40%或0分率≥50% | 长尾中的明显异常 |",
+        "| L2_长尾待核 | 30–299题，且未命中L1 | 证据不足，不自动改释义 |",
+        "| P0_明显异常 | 正样本≥300，且match<20%或0分率≥60% | 优先核查旧ID误挂/语义漂移 |",
+        "| P1_重点核验 | 正样本≥300，且match<55%或0分率≥30% | 区分旧标错与释义漏项 |",
+        "| P2_边界观察 | match<70%、初筛非稳定，或既有策略要求人工跟进 | 中等覆盖，需结合负样本 |",
+        "| S_正样本稳定 | 未命中以上任何规则 | 只表示正样本覆盖稳定 |",
+        "",
+        "旧135个问题Label集合由`P0_图谱冲突/P0_明显异常/P1_重点核验/L0_极端长尾/L1_长尾异常`加上既有策略中明确要求人工跟进的Label组成。",
         "",
         "## 135个问题Label的正样本分数分段",
         "",
@@ -363,71 +446,90 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
     full.extend(
         [
             "",
-            "## 自动联合筛查（保留原始阈值）",
+            "## V2校正后联合分档",
             "",
-            "| 筛查类别 | Label数 |",
-            "|---|---:|",
-        ]
-    )
-    for screen, count in sorted(screen_counts.items()):
-        full.append(f"| {screen} | {count} |")
-    full.extend(
-        [
-            "",
-            "## 经语义结构校正后的解读",
-            "",
-            "| 解读 | Label数 | 含义 |",
+            "| 联合分档 | Label数 | 规则与含义 |",
             "|---|---:|---|",
         ]
     )
-    meanings = {
-        "边界冲突": "正覆盖低且兄弟接受高，需优先复核。",
-        "旧标噪声/释义偏窄待分": "兄弟排除好，但历史正题覆盖低，先区分旧标错与释义漏项。",
-        "偏宽或兄弟重叠": "正覆盖高且兄弟接受高，需逐对判断合理共标或过宽。",
-        "层级口径冲突": "综合/上位Label的正负样本口径都受层级规则影响。",
-        "天然重叠/伪负例": "兄弟题可合理命中上位/比较Label，不能据此说释义偏宽。",
-        "正负边界稳定": "正覆盖高且兄弟排除稳定。",
-        "轻度边界复核": "一项指标未达稳定门槛，但未达高风险。",
-        "长尾待人工": "少于300道独立题，不自动改释义。",
-        "负样本缺失": "没有硬负样本。",
-        "负样本不足": "硬负样本少于20。",
+    corrected_meanings = {
+        "A_STABLE_CANDIDATE": "正样本≥300、match≥70%、有效负样本≥20、校正排除率≤10%；当前稳定候选。",
+        "B_MINOR_BOUNDARY_REVIEW": "未命中A/C/D/E的中间档；这是异质兜底组，不能统一解读为轻度问题。",
+        "C_NARROW_OR_LEGACY_NOISE_REVIEW": "正样本match<55%且校正排除率≤10%；优先分旧标噪声与释义偏窄。",
+        "D_BROAD_BOUNDARY_REVIEW": "正样本match≥70%且校正排除率>15%；在最小集合口径下存在边界风险。",
+        "E_BOUNDARY_CONFLICT_REVIEW": "正样本match<55%且校正排除率>15%；正负两侧均冲突。",
+        "U_INSUFFICIENT_VALID_NEGATIVES": "正样本≥300，但有效负样本<20；不按比例自动下结论。",
+        "U_LONG_TAIL_REVIEW": "正样本<300；长尾优先，不按比例自动改释义。",
     }
-    for category in category_order:
-        full.append(f"| {category} | {category_counts[category]} | {meanings[category]} |")
+    for screen in (
+        "A_STABLE_CANDIDATE",
+        "B_MINOR_BOUNDARY_REVIEW",
+        "C_NARROW_OR_LEGACY_NOISE_REVIEW",
+        "D_BROAD_BOUNDARY_REVIEW",
+        "E_BOUNDARY_CONFLICT_REVIEW",
+        "U_INSUFFICIENT_VALID_NEGATIVES",
+        "U_LONG_TAIL_REVIEW",
+    ):
+        full.append(
+            f"| {screen} | {corrected_screen_counts[screen]} | {corrected_meanings[screen]} |"
+        )
     full.extend(
         [
             "",
-            "## 458个Label联合分析",
+            "## 77个新增边界风险候选（旧135之外）",
             "",
-            "| Label | ID | 正题n | 正match | 负题n | 兄弟接受 | 自动筛查 | 校正解读 | 最高混淆source→target | 结论 |",
-            "|---|---|---:|---:|---:|---:|---|---|---|---|",
+            "这77个Label的选入理由是一致的：",
+            "",
+            "1. 不在正样本旧135问题集合中；",
+            "2. 正样本不少于300题，避免长尾比例波动；",
+            "3. 移除合理共标、来源Label不足、两侧都不充分后，有效负样本不少于20题；",
+            "4. V2匿名最小充分集合中，目标Label被排除的校正比例>15%。",
+            "",
+            f"按当前结果共{len(additional_boundary_items)}个：58个`D_BROAD_BOUNDARY_REVIEW` + 19个落入兜底B档但校正排除率仍>15%的Label。",
+            "",
+            "这些Label的证据只说明“在当前DS最小集合策略下经常被排除”。如果原source Label有误，或业务允许合理冗余多标，就不能直接归因为老师释义偏宽。",
+            "",
+            "| Label | ID | 正样本分档 | 正题n | 正match | 有效负n | 目标排除 | 校正排除率 | 联合分档 |",
+            "|---|---|---|---:|---:|---:|---:|---:|---|",
+        ]
+    )
+    for item in additional_boundary_items:
+        label, pos, row = item["label"], item["positive"], item["corrected"]
+        full.append(
+            f"| {md(label['label_name'])} | `{label['label_id']}` | "
+            f"{positive_risk_level(pos, item['strategy'])} | {pos['planned']} | "
+            f"{pct(pos['match_rate'])} | {row['valid_negative_count']} | "
+            f"{row['true_boundary_errors']} | {pct(row['corrected_boundary_error_rate'])} | "
+            f"{row['final_screen']} |"
+        )
+    full.extend(
+        [
+            "",
+            "## 458个Label校正后联合分析",
+            "",
+            "| Label | ID | 正样本分档 | 正题n | 正match | 原始负n | 第一阶段接受 | 伪负例移除 | 有效负n | 目标排除 | 校正排除率 | 联合分档 |",
+            "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|",
         ]
     )
     for item in items:
-        label, pos, neg = item["label"], item["positive"], item["negative"]
-        pair = item["pairs"][0] if item["pairs"] else None
-        pair_text = (
-            f"{pair['source_label_name']}→{label['label_name']} "
-            f"{pair['false_accept']}/{pair['total']}"
-            if pair
-            else "-"
-        )
+        label, pos, row = item["label"], item["positive"], item["corrected"]
         full.append(
-            f"| {md(label['label_name'])} | `{label['label_id']}` | {pos['planned']} | "
-            f"{pct(pos['match_rate'])} | {neg['hard_negative_total'] if neg else 0} | "
-            f"{pct(neg['false_accept_rate']) if neg else '-'} | "
-            f"{item['combined']['final_screen']} | {item['category']} | {md(pair_text)} | "
-            f"{md(item['conclusion'])} |"
+            f"| {md(label['label_name'])} | `{label['label_id']}` | "
+            f"{positive_risk_level(pos, item['strategy'])} | {pos['planned']} | "
+            f"{pct(pos['match_rate'])} | {row['hard_negative_total']} | "
+            f"{row['first_stage_accepted']} | {row['invalid_sibling_negatives']} | "
+            f"{row['valid_negative_count']} | {row['true_boundary_errors']} | "
+            f"{pct(row['corrected_boundary_error_rate'])} | {row['final_screen']} |"
         )
     full.extend(
         [
             "",
-            "## 实验方案修正建议",
+            "## 结论边界与后续验证",
             "",
-            "1. 硬负样本建议从“同父级即负例”升级为“经语义判定不应共标的兄弟对”。",
-            "2. 综合、比较、上位、信息形式Label不用普通兄弟题计算偏宽率；应另建“只考单端且不需要比较/联动”的专用负例。",
-            "3. 对DS接受的5,555条先做二次共标Judge：输出“合理共标/目标过宽/源标签不充分/无法判断”。",
-            "4. 只把“不应共标但目标Label仍接受”计入真正边界误收率。",
+            "1. V2已经显式识别1,445条“来源Label不足”和24条“两侧都不充分”，证明原source Label不能当金标。",
+            "2. V2 Prompt要求最小充分集合，会排斥部分业务可接受的合理上下位/冗余多标；因此2,683条是风险证据，不是人工真值。",
+            "3. 如要估计“只要合理即可保留”的真实错标率，需用V3对source/target逐个独立T/F，禁止因另一Label更具体就拒绝当前Label。",
+            "4. 当前77个新增候选应给老师看代表题，判断是原source错、合理共标、最小集合偏好，还是target确实不应打。",
             "",
         ]
     )
@@ -545,6 +647,7 @@ def main() -> int:
     parser.add_argument("--negative-per-label", type=Path, required=True)
     parser.add_argument("--confusion-pairs", type=Path, required=True)
     parser.add_argument("--combined", type=Path, required=True)
+    parser.add_argument("--corrected-assessments", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     args = parser.parse_args()
     full, focus = generate(args)
