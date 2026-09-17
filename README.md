@@ -18,6 +18,7 @@
 - 人工审核样本：从2,500题中确定性抽取200题近似均匀指标集和100题覆盖导向压力集，保持题目与候选严格对齐。
 - 精判对比：已完成同一300题的v4/v6/v7/v8.1/v8.2运行与重点回归复核；v8.3保留五道硬门槛和内部反证，但删除会干扰主任务的显式风险候选输出。
 - 历史弱监督：支持用“旧 `knw_ids` 与当前458 Label的交集”大规模验证Recall@K、补充候选，并按Label抽题做DS T/F释义边界审核；废弃旧ID始终移除。
+- 释义覆盖复核：完成179,568个独立题正样本与21,647个兄弟Label硬负样本审核，输出458个Label正负联合分档、source→target混淆对及具体题目证据。
 
 DS 题目打标 Pilot 已完成v4、v6和v7；v7覆盖恢复但精度未过门槛，v8待在原300题上复测。仓库不会把未经人工审核的模型输出冒充金标。
 
@@ -69,3 +70,5 @@ python3 -m venv .venv
 ```
 
 正式题目格式、无旧 `knw_ids` 的混合召回方案、DS裁决协议、父题聚合规则和Pilot口径见 [题库打标策略](docs/tagging-strategy.md)。
+
+独立题正样本的458个Label逐项复核见 [正样本覆盖复核](docs/positive-coverage-audit/biology-458-label-positive-coverage-review.md)；加入兄弟Label硬负样本后的最终联合分析见 [正负样本联合复核](docs/positive-coverage-audit/biology-458-label-positive-negative-combined-review.md)，需学科重点确认的source→target证据见 [边界重点复核](docs/positive-coverage-audit/biology-label-boundary-focus-positive-negative-evidence.md)。
