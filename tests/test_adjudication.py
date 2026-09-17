@@ -55,6 +55,17 @@ def _candidate(index: int) -> dict:
     }
 
 
+def _scope_checks(codes) -> dict:
+    return {
+        code: {
+            "question_scope": "题干直接任务",
+            "label_scope_quote": "定义",
+            "scope_relation": "EXACT",
+        }
+        for code in codes
+    }
+
+
 def test_audited_exclusion_removes_only_the_known_bad_question_label_pair(
     tmp_path: Path,
 ):
@@ -160,6 +171,7 @@ def test_run_adjudication_materializes_audited_exclusion_and_filters_training(
                 "reason": "模型选中了两个标签。",
                 "selected": selected_codes,
                 "evidence": {code: "题干" for code in selected_codes},
+                "scope_checks": _scope_checks(selected_codes),
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -261,13 +273,13 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v91b_prompt_is_compact_and_enforces_hard_boundaries():
+def test_v91e_prompt_requires_definition_contract_evidence():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v9.1b-compact-hard-boundaries"
+    assert PROMPT_VERSION == "candidate-adjudication-v9.1e-definition-contract-evidence"
     assert "错标的代价远高于漏标" in prompt
     assert "硬否决：任意一项成立就拒绝，后续不得翻回" in prompt
     assert "反证复核" in prompt
@@ -285,17 +297,60 @@ def test_v91b_prompt_is_compact_and_enforces_hard_boundaries():
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
     assert "rejected_risky" not in prompt
-    assert "core_concepts只用于解释该范围内的概念和机制" in prompt
+    assert "core_concepts只用于解释已由scope_contract确定的范围内概念和机制" in prompt
+    assert '"scope_contract"' in prompt
+    assert '"supporting_notes"' in prompt
+    assert "不能从core_concepts中引用入选依据" in prompt
+    assert "label_scope_quote必须从当前Label的definition或distinctions逐字复制" in prompt
+    assert "找不到直接授权当前任务的Label侧原文就拒绝" in prompt
     assert "evidence必须支持该Label的直接考查" in prompt
     assert "1至2句话、不超过120字" in prompt
     assert '"reason": "当前设问直接考查……"' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
     assert schema.index('"selected"') < schema.index('"evidence"')
-    assert schema.index('"evidence"') < schema.index('"context_insufficient"')
+    assert schema.index('"evidence"') < schema.index('"scope_checks"')
+    assert schema.index('"scope_checks"') < schema.index('"context_insufficient"')
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert schema.index('"need_expand_recall"') < schema.index('"reason"')
     assert '"evidence": {"C01": "题目原文", "C05": "题目原文"}' in prompt
+
+
+def test_validate_v91e_requires_verbatim_definition_contract_for_each_selection():
+    value = {
+        "reason": "当前设问直接考查标签一。",
+        "selected": ["C01"],
+        "evidence": {"C01": "题干"},
+        "scope_checks": {
+            "C01": {
+                "question_scope": "当前题干的具体任务",
+                "label_scope_quote": "标签一定义",
+                "scope_relation": "EXACT",
+            }
+        },
+        "need_expand_recall": False,
+        "context_insufficient": False,
+    }
+    contracts = {"C01": "标签一定义\n标签一边界"}
+
+    result = validate_adjudication_result(value, {"C01"}, contracts)
+
+    assert result["scope_checks"]["C01"]["label_scope_quote"] == "标签一定义"
+    with pytest.raises(ValueError, match="definition contract"):
+        validate_adjudication_result(
+            {
+                **value,
+                "scope_checks": {
+                    "C01": {
+                        "question_scope": "当前题干的具体任务",
+                        "label_scope_quote": "只在core_concepts中存在",
+                        "scope_relation": "EXACT",
+                    }
+                },
+            },
+            {"C01"},
+            contracts,
+        )
 
 
 def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
@@ -320,6 +375,7 @@ def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
                 "reason": "解析中存在相关知识。",
                 "selected": ["C01"],
                 "evidence": {"C01": "解析"},
+                "scope_checks": _scope_checks(["C01"]),
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -558,6 +614,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
                 "reason": "当前题目直接考查标签28。",
                 "selected": [code_for_l28],
                 "evidence": {code_for_l28: "题干"},
+                "scope_checks": _scope_checks([code_for_l28]),
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -679,6 +736,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
                 "reason": "当前题目直接考查标签1。",
                 "selected": ["C01"],
                 "evidence": {"C01": "题干"},
+                "scope_checks": _scope_checks(["C01"]),
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -832,6 +890,7 @@ def test_run_adjudication_filters_risky_training_rows(
                 "reason": "根据题目证据作出判断。",
                 "selected": selected,
                 "evidence": {code: "题干" for code in selected},
+                "scope_checks": _scope_checks(selected),
                 "need_expand_recall": expand,
                 "context_insufficient": context,
             },

@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9.1b-compact-hard-boundaries"
+PROMPT_VERSION = "candidate-adjudication-v9.1e-definition-contract-evidence"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -139,9 +139,13 @@ def build_adjudication_prompt(
                 "code": code,
                 "label_name": label.get("label_name", ""),
                 "label_path": format_label_path(label.get("label_path")),
-                "definition": label.get("definition", ""),
-                "core_concepts": label.get("core_concepts", ""),
-                "distinctions": label.get("distinctions", ""),
+                "scope_contract": {
+                    "definition": label.get("definition", ""),
+                    "distinctions": label.get("distinctions", ""),
+                },
+                "supporting_notes": {
+                    "core_concepts": label.get("core_concepts", ""),
+                },
             }
         )
     question = {
@@ -164,34 +168,41 @@ def build_adjudication_prompt(
 任务是判断：当前小题是否直接考查候选Label所定义的知识范围，而不是寻找所有相关知识。只输出简短结论，不输出详细思考过程。
 
 一、先界定Label
-Label有效范围由label_name、label_path、definition和distinctions共同确定。distinctions是硬否决边界。core_concepts只用于解释该范围内的概念和机制，不能扩大Label范围；只命中其中一个方法、实例、名词或底层机制，不足以选中Label。
+Label有效范围由label_name、label_path和scope_contract中的definition、distinctions共同确定。distinctions是硬否决边界。supporting_notes中的core_concepts只用于解释已由scope_contract确定的范围内概念和机制，不能扩大Label范围，也不能从core_concepts中引用入选依据。只命中其中一个方法、实例、名词或底层机制，不足以选中Label。
 
-二、硬否决：任意一项成立就拒绝，后续不得翻回
+二、Label侧定义契约校验
+每个暂定入选Label都必须同时提供两侧证据：
+1. evidence：从当前stem、options、answer_text或analysis逐字复制，证明题目的直接考查任务。
+2. label_scope_quote必须从当前Label的definition或distinctions逐字复制，证明Label定义契约直接覆盖同一对象、任务和目标。不得从core_concepts复制，不得改写或自行补充知识。
+3. question_scope：用简短语句说明当前题实际要求判断的对象、任务和目标。scope_relation只能是EXACT。
+找不到直接授权当前任务的Label侧原文就拒绝。通用开场白、仅共享名词或底层机制的原文不是有效授权。
+
+三、硬否决：任意一项成立就拒绝，后续不得翻回
 1. 对象不一致：若Label被限定到特定物种、疾病、性状、实验、材料、组织、器官、细胞类型、技术或应用场景，则当前题目必须实际考查同一对象。不得因遗传方式、分子/生理机制、实验原理相同，而把具体对象A横向迁移到具体对象B的Label。具体对象题可以选其真正考查的通用上位机制Label。对象一致只是必要条件，不是选中条件。
 2. 任务或维度不一致：原理/规律、结构、功能、现象、生理过程、实验原理、实验操作/设计/结果、判定方法、应用、结论和科学史不能互相替代。题目只是使用已知结论完成推断，不等于考查该结论的判定方法或发现实验。
 3. 生命层级、结构或作用通道不一致：不得因宏观过程包含某个微观机制，或微观机制相似，就用不同层级的Label替代当前考点。
 4. 当前小题范围不一致：只判断当前小题。parent_stem只能在当前小题存在“该患者、该实验、图中”等明确指代时补足对象和语境，不能单独制造考点。父题其他内容和兄弟小题的知识不选。
 5. 与distinctions冲突：若题目落在distinctions排除的一侧，立即拒绝。
 
-三、还原当前任务
+四、还原当前任务
 通过硬否决后，仅根据当前stem、options、answer_text和analysis，判断学生为了得出正确答案必须完成哪些具体判断。材料中出现的概念、解析为讲解完整而补充的背景，不自动算考点。错误选项只有在判断它错误必须调用该知识，且它构成题目的实质性考查而非孤立干扰信息时，才可支持该Label。
 
-四、正向选中：必须同时满足
+五、正向选中：必须同时满足
 1. 范围命中：当前认知任务本身落在Label有效范围内，不是同章节、关键词相同、上下位相关、共享机制或类比实例。
 2. 直接考查：该Label必须直接支持当前答案中一个关键判断。仅作为背景、材料对象、深层解释或“知道后理解更完整”不算直接考查。
 3. 独立作用：多Label时，每个Label都必须独立解释当前题目中一个真实存在的判断任务。不得因一个Label成立就顺带加入父级、子级、同机制、同章节或常见搭配Label。上下位Label只有在题目分别直接考查两者时才可同选。
 4. 关键判断：必须能指出“该Label直接支持了答案中哪一个关键判断”。如果只能说有帮助、相关或让理解更完整，则拒绝。不要因存在另一条解题路径，就拒绝一个本身被题目直接考查的合理Label。
 
-五、特殊Label
+六、特殊Label
 1. 通用机制Label：若Label定义的是通用原理、规律、分类或方法，且题目确实直接应用它完成判断，可以跨不同材料实例选择。但具体对象A只能上溯到通用机制Label，不能横向迁移到共享机制的具体对象B Label。
 2. 实验、方法、观察、调查、测定、制作、构建、判定类Label：只有当前设问真正要求学生判断对应目的、原理、步骤、变量、现象、结果、误差、方案或判定方法本身时才选择。只是使用该实验的结论、出现名称/材料，或利用已知对象信息做其他推断，都不选该类Label。
 3. 综合Label：只有当前设问要求联动多个子知识得出一个联合结论时才选择。题目包含多个彼此独立的子知识，不等于考查综合Label；“综合、其他、应用”不得作为候选不精确时的兜底。
 
-六、evidence与最终复核
+七、evidence与最终复核
 每个selected Label必须提供一条不超过60字的evidence，从当前stem、options、answer_text或analysis中复制，不得推理补写。当前小题有明确指代时，parent_stem可用于证明对象，但不能单独证明考点。evidence必须支持该Label的直接考查，不是只证明二者相关。
 生成selected前，对每个暂定Label反证复核：若它实际只是共享机制、同章节/上下位相关、另一具体对象、不同考查维度、背景补充或孤立干扰项，就删除。宁可少选，不做弱关联补标。
 
-七、状态判断
+八、状态判断
 轻微错别字/OCR异常若可由答案、解析和其他信息唯一消除，context_insufficient=false。只有缺图、缺父题或信息冲突导致连一个可靠Label都无法确定时，才设context_insufficient=true。
 若当前小题有明确生物考点，但所有候选都无法成立：selected=[]、need_expand_recall=true。若已有可靠Label，只是怀疑存在不确定次要Label，保留可靠结果且need_expand_recall=false，不猜测补齐。非有效高中生物考查：selected=[]、need_expand_recall=false、context_insufficient=false。
 
@@ -209,6 +220,10 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 {{
   "selected": ["C01", "C05"],
   "evidence": {{"C01": "题目原文", "C05": "题目原文"}},
+  "scope_checks": {{
+    "C01": {{"question_scope": "当前任务", "label_scope_quote": "Label定义契约原文", "scope_relation": "EXACT"}},
+    "C05": {{"question_scope": "当前任务", "label_scope_quote": "Label定义契约原文", "scope_relation": "EXACT"}}
+  }},
   "context_insufficient": false,
   "need_expand_recall": false,
   "reason": "当前设问直接考查……"
@@ -220,6 +235,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 def validate_adjudication_result(
     value: dict[str, Any],
     known_codes: set[str],
+    scope_contracts_by_code: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     required = (
         "reason",
@@ -277,10 +293,43 @@ def validate_adjudication_result(
         if len(evidence) > 300:
             raise ValueError(f"evidence for {code} is too long")
         normalized_evidence[code] = evidence
+    normalized_scope_checks: dict[str, dict[str, str]] = {}
+    if scope_contracts_by_code is not None:
+        raw_scope_checks = value.get("scope_checks")
+        if not isinstance(raw_scope_checks, dict):
+            raise ValueError("scope_checks must be an object")
+        for code in normalized:
+            check = raw_scope_checks.get(code)
+            if not isinstance(check, dict):
+                raise ValueError(f"missing scope_checks for {code}")
+            question_scope = check.get("question_scope")
+            label_scope_quote = check.get("label_scope_quote")
+            scope_relation = check.get("scope_relation")
+            if not isinstance(question_scope, str) or not question_scope.strip():
+                raise ValueError(f"missing question_scope for {code}")
+            if not isinstance(label_scope_quote, str) or not label_scope_quote.strip():
+                raise ValueError(f"missing label_scope_quote for {code}")
+            if scope_relation != "EXACT":
+                raise ValueError(f"scope_relation must be EXACT for {code}")
+            question_scope = question_scope.strip()
+            label_scope_quote = label_scope_quote.strip()
+            if len(question_scope) > 300 or len(label_scope_quote) > 300:
+                raise ValueError(f"scope_checks for {code} is too long")
+            contract = scope_contracts_by_code.get(code, "")
+            if label_scope_quote not in contract:
+                raise ValueError(
+                    f"label_scope_quote is not in definition contract for {code}"
+                )
+            normalized_scope_checks[code] = {
+                "question_scope": question_scope,
+                "label_scope_quote": label_scope_quote,
+                "scope_relation": "EXACT",
+            }
     return {
         "reason": reason,
         "selected": normalized,
         "evidence": normalized_evidence,
+        "scope_checks": normalized_scope_checks,
         "unknown_selected_codes_dropped": unknown_codes,
         "context_insufficient": value["context_insufficient"],
         "need_expand_recall": value["need_expand_recall"] or bool(unknown_codes),
@@ -458,6 +507,15 @@ def run_adjudication(
             record["parsed_response"] = validate_adjudication_result(
                 parse_json_content(response.content),
                 set(code_map),
+                {
+                    code: "\n".join(
+                        (
+                            str(labels_by_id[label_id].get("definition") or ""),
+                            str(labels_by_id[label_id].get("distinctions") or ""),
+                        )
+                    )
+                    for code, label_id in code_map.items()
+                },
             )
         except DSRequestError as exc:
             record.update(
@@ -569,6 +627,15 @@ def run_adjudication(
                         "sparse_rank": candidate.get("sparse_rank"),
                         "dense_rank": candidate.get("dense_rank"),
                         "evidence": parsed["evidence"][code],
+                        "question_scope": parsed["scope_checks"][code][
+                            "question_scope"
+                        ],
+                        "label_scope_quote": parsed["scope_checks"][code][
+                            "label_scope_quote"
+                        ],
+                        "scope_relation": parsed["scope_checks"][code][
+                            "scope_relation"
+                        ],
                     }
                 )
             selected_labels, removed_by_audit, exclude_from_training = (
