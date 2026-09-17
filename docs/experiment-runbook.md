@@ -1531,6 +1531,61 @@ printf 'V92_RUN=%s PID=%s\n' "$V92_RUN" "$PID"
 
 验收时要求`prompt_version=candidate-adjudication-v9.2-literal-name-anchored-evidence`，重点看果蝇题是否排除“人类红绿色盲症”、其余3道硬错是否保持正确、`questions_with_unverified_evidence`与`context_insufficient_forced_false`。
 
+### V9.2b Top25 + 当前458内原题knw_ids
+
+后续主线不再默认使用纯Top30，改为原混合召回Top25加原题`legacy_knw_ids`。只追加仍存在于当前458 Label表的ID；释义表外的旧ID删除，与Top25重复的ID去重。旧ID只是候选，不直接当作最终标签。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+if test -f runtime/LATEST_UPDATED_LABEL_UNITS_RUN; then
+  UNIT_RUN="$(cat runtime/LATEST_UPDATED_LABEL_UNITS_RUN)"
+else
+  UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
+fi
+
+V92_LEGACY_CANDIDATES_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v92-top25-plus-legacy-candidates"
+mkdir -p "$V92_LEGACY_CANDIDATES_RUN"
+
+PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --legacy-units "$UNIT_RUN/label_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V92_LEGACY_CANDIDATES_RUN"
+
+printf '%s\n' "$V92_LEGACY_CANDIDATES_RUN" \
+  > runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
+python -m json.tool "$V92_LEGACY_CANDIDATES_RUN/report.json"
+
+V92_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v92-top25-plus-legacy"
+mkdir -p "$V92_LEGACY_RUN"
+printf '%s\n' "$V92_LEGACY_RUN" \
+  > runtime/LATEST_ADJUDICATION_V92_TOP25_PLUS_LEGACY_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V92_LEGACY_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 768 \
+  > "$V92_LEGACY_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V92_LEGACY_RUN/pid"
+printf 'V92_LEGACY_RUN=%s PID=%s\n' "$V92_LEGACY_RUN" "$PID"
+```
+
+验收时先看候选数分布、`legacy_candidates_added`和`obsolete_legacy_assignments_removed`，再比较纯Top30的明确错标、空标、扩召和可训练题数。
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。
