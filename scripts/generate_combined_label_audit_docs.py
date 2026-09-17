@@ -46,6 +46,60 @@ def overlap_prone(name: str) -> bool:
     )
 
 
+def positive_risk_level(
+    metric: dict[str, Any], strategy: dict[str, Any] | None
+) -> str:
+    """Keep the 135-label positive-audit scope consistent across reports."""
+    planned = int(metric["planned"])
+    match_rate = float(metric["match_rate"])
+    zero_rate = float(metric["zero_rate"])
+    final_strategy = (strategy or {}).get("final_strategy") or {}
+    status = final_strategy.get("status")
+    manual_followup = bool(final_strategy.get("manual_followup_required"))
+    if status == "taxonomy_hold":
+        return "P0_图谱冲突"
+    if planned < 30:
+        return "L0_极端长尾"
+    if planned < 300:
+        if match_rate < 0.40 or zero_rate >= 0.50:
+            return "L1_长尾异常"
+        return "L2_长尾待核"
+    if match_rate < 0.20 or zero_rate >= 0.60:
+        return "P0_明显异常"
+    if match_rate < 0.55 or zero_rate >= 0.30:
+        return "P1_重点核验"
+    if match_rate < 0.70 or metric["preliminary_grade"] != "A_STABLE_CANDIDATE":
+        return "P2_边界观察"
+    if manual_followup:
+        return "P2_边界观察"
+    return "S_正样本稳定"
+
+
+def positive_score_bands(rows: list[dict[str, Any]]) -> dict[str, int | float]:
+    """Return mutually exclusive score bands used in the positive audit."""
+    scores = [float(row["relevance_score"]) for row in rows]
+    total = len(scores)
+    irrelevant = sum(score < 0.10 for score in scores)
+    related_below_definition = sum(0.10 <= score < 0.70 for score in scores)
+    matched = sum(score >= 0.70 for score in scores)
+    high_confidence = sum(score >= 0.80 for score in scores)
+    if irrelevant + related_below_definition + matched != total:
+        raise ValueError("positive score bands do not sum to the Label total")
+    return {
+        "total": total,
+        "irrelevant": irrelevant,
+        "irrelevant_rate": irrelevant / total if total else 0.0,
+        "related_below_definition": related_below_definition,
+        "related_below_definition_rate": (
+            related_below_definition / total if total else 0.0
+        ),
+        "matched": matched,
+        "matched_rate": matched / total if total else 0.0,
+        "high_confidence": high_confidence,
+        "high_confidence_rate": high_confidence / total if total else 0.0,
+    }
+
+
 def interpretation(
     label: dict[str, Any], positive: dict[str, Any], negative: dict[str, Any] | None
 ) -> tuple[str, str]:
@@ -222,6 +276,52 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
     category_counts = Counter(item["category"] for item in items)
     screen_counts = Counter(item["combined"]["final_screen"] for item in items)
 
+    positive_problem_risks = {
+        "P0_图谱冲突",
+        "P0_明显异常",
+        "P1_重点核验",
+        "L0_极端长尾",
+        "L1_长尾异常",
+    }
+    positive_problem_items = []
+    for item in items:
+        label_id = str(item["label"]["label_id"])
+        risk = positive_risk_level(item["positive"], item["strategy"])
+        manual_followup = bool(
+            ((item["strategy"].get("final_strategy") or {}).get(
+                "manual_followup_required"
+            ))
+        )
+        if risk not in positive_problem_risks and not manual_followup:
+            continue
+        positive_problem_items.append(
+            {
+                **item,
+                "positive_risk": risk,
+                "score_bands": positive_score_bands(
+                    positive_results_by_label[label_id]
+                ),
+            }
+        )
+    positive_problem_items.sort(
+        key=lambda item: (
+            -float(item["score_bands"]["irrelevant_rate"]),
+            -float(item["score_bands"]["related_below_definition_rate"]),
+            str(item["label"]["label_name"]),
+        )
+    )
+    positive_problem_totals = Counter()
+    for item in positive_problem_items:
+        bands = item["score_bands"]
+        for key in (
+            "total",
+            "irrelevant",
+            "related_below_definition",
+            "matched",
+            "high_confidence",
+        ):
+            positive_problem_totals[key] += int(bands[key])
+
     full = [
         "# 高中生物458个Label正负样本联合复核",
         "",
@@ -239,11 +339,36 @@ def generate(args: argparse.Namespace) -> tuple[Path, Path]:
         "- 硬负样本覆盖440/458个Label；18个Label无可用兄弟负样本。",
         "- 硬负样本按目标Label分层：150个≤5%，88个5%–15%，63个15%–30%，139个>30%。",
         "",
-        "## 自动联合筛查（保留原始阈值）",
+        "## 135个问题Label的正样本分数分段",
         "",
-        "| 筛查类别 | Label数 |",
-        "|---|---:|",
+        "- 本表仅收录正样本阶段筛出的135个问题Label，与《高中生物需重点关注的Label与释义证据》口径一致。",
+        "- 三档互斥：`<0.10`为基本无关；`0.10–0.69`为与Label相关、但未达到当前释义的主要考查要求；`≥0.70`为匹配。",
+        "- `相关但未达到释义要求`不等于错标；它主要用来定位上位/综合Label口径、历史弱标与释义边界之间的冲突。",
+        f"- 合计：{positive_problem_totals['total']:,}题；基本无关{positive_problem_totals['irrelevant']:,}题（{positive_problem_totals['irrelevant'] / positive_problem_totals['total']:.2%}）；相关但未达到释义要求{positive_problem_totals['related_below_definition']:,}题（{positive_problem_totals['related_below_definition'] / positive_problem_totals['total']:.2%}）；已匹配{positive_problem_totals['matched']:,}题（{positive_problem_totals['matched'] / positive_problem_totals['total']:.2%}）。",
+        "",
+        "| Label | ID | 风险层 | 总题数 | 基本无关题/总题数 | 基本无关占比 | 相关但未达到释义要求/总题数 | 边界题占比 | 匹配题/总题数 | 匹配占比 | 高置信题(≥0.80)/总题数 | 高置信占比 |",
+        "|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
+    for item in positive_problem_items:
+        label = item["label"]
+        bands = item["score_bands"]
+        total = int(bands["total"])
+        full.append(
+            f"| {md(label['label_name'])} | `{label['label_id']}` | {item['positive_risk']} | {total} | "
+            f"{bands['irrelevant']}/{total} | {float(bands['irrelevant_rate']):.2%} | "
+            f"{bands['related_below_definition']}/{total} | {float(bands['related_below_definition_rate']):.2%} | "
+            f"{bands['matched']}/{total} | {float(bands['matched_rate']):.2%} | "
+            f"{bands['high_confidence']}/{total} | {float(bands['high_confidence_rate']):.2%} |"
+        )
+    full.extend(
+        [
+            "",
+            "## 自动联合筛查（保留原始阈值）",
+            "",
+            "| 筛查类别 | Label数 |",
+            "|---|---:|",
+        ]
+    )
     for screen, count in sorted(screen_counts.items()):
         full.append(f"| {screen} | {count} |")
     full.extend(
