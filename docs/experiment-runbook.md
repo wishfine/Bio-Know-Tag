@@ -1574,6 +1574,8 @@ printf 'V91B_LEGACY_RUN=%s PID=%s\n' "$V91B_LEGACY_RUN" "$PID"
 
 `definition-verifier-v1-independent`是V9.1b之后的独立二次复核。它只接收当前题和第一阶段选中的Label，但不接收第一阶段reason、`core_concepts`、召回来源、排名或分数。它只用`definition + distinctions`对每个Label独立输出T/F，用于减少第一阶段“先选中、再为自己找理由”的自我合理化。
 
+为了做Prompt消融时观察模型原始选择，第一阶段可传`--no-audited-exclusions`关闭人工审计排除；正式物化时不传该参数。
+
 ```bash
 DEFINITION_VERIFY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-definition-verifier"
 mkdir -p "$DEFINITION_VERIFY_RUN"

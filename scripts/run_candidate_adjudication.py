@@ -23,6 +23,11 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=Path("configs/adjudication_audited_exclusions.json"),
     )
+    parser.add_argument(
+        "--no-audited-exclusions",
+        action="store_true",
+        help="disable audited exclusions for prompt ablation/evaluation",
+    )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--endpoint", action="append", dest="endpoints")
     parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
@@ -75,7 +80,9 @@ def main() -> int:
         limit=args.limit,
         max_tokens=args.max_tokens,
         workers=args.workers,
-        audited_exclusions_path=args.audited_exclusions,
+        audited_exclusions_path=(
+            None if args.no_audited_exclusions else args.audited_exclusions
+        ),
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1
