@@ -166,6 +166,26 @@ def test_v92_prompt_requires_literal_name_and_anchored_evidence():
     assert '"quote": "题目连续原文"' in prompt
 
 
+def test_diagnostic_prompt_expands_reviews_only_for_requested_focus_codes():
+    labels = {"L1": _label("L1", "通用Label"), "L2": _label("L2", "具体Label")}
+    prompt, code_map = build_adjudication_prompt(
+        _unit(),
+        [_candidate(1), _candidate(2)],
+        labels,
+        diagnostic_focus_label_ids={"L2"},
+    )
+    focus_code = next(code for code, label_id in code_map.items() if label_id == "L2")
+
+    assert "这是单题诊断模式" in prompt
+    assert json.dumps([focus_code], ensure_ascii=False) in prompt
+    assert '"candidate_reviews"' in prompt
+    assert '"label_name_literal_test"' in prompt
+    assert '"object_scope_match"' in prompt
+    assert '"shared_mechanism_only"' in prompt
+    assert '"counterevidence"' in prompt
+    assert "evidence.quote可不超过300字" in prompt
+
+
 def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
     units_path = tmp_path / "units.jsonl"
     candidates_path = tmp_path / "candidates.jsonl"

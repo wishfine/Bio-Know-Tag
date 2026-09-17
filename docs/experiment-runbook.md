@@ -1586,6 +1586,45 @@ printf 'V92_LEGACY_RUN=%s PID=%s\n' "$V92_LEGACY_RUN" "$PID"
 
 验收时先看候选数分布、`legacy_candidates_added`和`obsolete_legacy_assignments_removed`，再比较纯Top30的明确错标、空标、扩召和可训练题数。
 
+如需查看果蝇眼色题为什么误选“人类红绿色盲症”，用诊断模式单独运行。诊断模式不改动主流程Prompt或输出，只对所有最终入选Label和指定重点Label输出长理由、对象边界、必要性、支持证据和反对证据。
+
+```bash
+V92_LEGACY_CANDIDATES_RUN="$(
+  cat runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
+)"
+FRUIT_FLY_DEBUG_RUN="runtime/$(date +%Y%m%d-%H%M%S)-fruit-fly-adjudication-debug"
+mkdir -p "$FRUIT_FLY_DEBUG_RUN"
+
+nohup env PYTHONPATH=src python scripts/debug_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --question-id '2327493552051331072' \
+  --focus-label-id '2276103483819315200' \
+  --focus-label-id '2276103479641788416' \
+  --run-dir "$FRUIT_FLY_DEBUG_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --timeout 600 \
+  --retries 5 \
+  --retry-delay 1 \
+  --max-tokens 6000 \
+  > "$FRUIT_FLY_DEBUG_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$FRUIT_FLY_DEBUG_RUN/pid"
+printf '%s\n' "$FRUIT_FLY_DEBUG_RUN" \
+  > runtime/LATEST_FRUIT_FLY_ADJUDICATION_DEBUG_RUN
+printf 'FRUIT_FLY_DEBUG_RUN=%s PID=%s\n' "$FRUIT_FLY_DEBUG_RUN" "$PID"
+```
+
+运行完成后查看：
+
+```bash
+FRUIT_FLY_DEBUG_RUN="$(cat runtime/LATEST_FRUIT_FLY_ADJUDICATION_DEBUG_RUN)"
+python -m json.tool "$FRUIT_FLY_DEBUG_RUN/result.json"
+```
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。

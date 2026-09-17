@@ -71,6 +71,8 @@ def build_adjudication_prompt(
     unit: dict[str, Any],
     candidates: list[dict[str, Any]],
     labels_by_id: dict[str, dict[str, Any]],
+    *,
+    diagnostic_focus_label_ids: set[str] | None = None,
 ) -> tuple[str, dict[str, str]]:
     question_id = str(unit.get("question_id") or "")
     shuffled_candidates = sorted(
@@ -113,6 +115,65 @@ def build_adjudication_prompt(
             (unit.get("flags") or {}).get("image_context_missing")
         ),
     }
+    if diagnostic_focus_label_ids is None:
+        output_instructions = """evidence.quote每条不超过60字，必须逐字复制连续原文，不得改写、拼接、填空、推导或补写。reason用1至2句话、不超过120字，概括最终选择或置空依据。
+
+只输出一个JSON对象：
+{
+  "selected": ["C01", "C05"],
+  "evidence": {
+    "C01": {"source": "stem", "quote": "题目连续原文"},
+    "C05": {"source": "analysis", "quote": "解析连续原文"}
+  },
+  "context_insufficient": false,
+  "need_expand_recall": false,
+  "reason": "当前设问直接考查……"
+}
+不要输出Markdown或JSON之外的内容。"""
+    else:
+        focus_codes = [
+            code
+            for code, label_id in code_map.items()
+            if label_id in diagnostic_focus_label_ids
+        ]
+        output_instructions = f"""这是单题诊断模式，不限制reason和detailed_reason为短句。
+在正常判标后，必须详细审核：
+1. 所有最终selected候选；
+2. 指定的重点候选：{json.dumps(focus_codes, ensure_ascii=False)}。
+
+对每个被审核候选分别回答：
+- 完整label_name代入“本题直接考查【label_name】”是否字面成立；
+- 题目对象与Label的物种、疾病、实验、材料、组织或场景限定是否一致；
+- 是否只是共享底层机制、类比或同类实例；
+- 不会该Label是否仍能完整解题；
+- 支持选择的原文证据和反对选择的证据；
+- 最终KEEP或REJECT。
+
+evidence.quote可不超过300字，但仍必须是指定source字段的连续原文。
+只输出一个JSON对象：
+{{
+  "selected": ["C01"],
+  "evidence": {{
+    "C01": {{"source": "analysis", "quote": "题目或解析的连续原文"}}
+  }},
+  "candidate_reviews": [
+    {{
+      "code": "C01",
+      "decision": "KEEP",
+      "label_name_literal_test": "通过或不通过，并解释",
+      "object_scope_match": "对象范围是否一致",
+      "shared_mechanism_only": false,
+      "necessary_for_solution": true,
+      "supporting_evidence": {{"source": "analysis", "quote": "连续原文"}},
+      "counterevidence": "题目中反对该Label的对象、维度或边界证据",
+      "detailed_reason": "详细说明为什么KEEP或REJECT"
+    }}
+  ],
+  "context_insufficient": false,
+  "need_expand_recall": false,
+  "reason": "详细总结最终选择，特别说明重点候选为什么被选或被拒绝"
+}}
+不要输出Markdown或JSON之外的内容。"""
     prompt = f"""你是严谨的高中生物知识点判标器。本任务采用非对称损失：错标的代价远高于漏标。可以少选、置空或扩召，绝不得把只是相关、更宽泛或边界不同的Label写入selected。
 
 任务流程（内部完成判断，只输出简短结论依据，不输出详细思考过程）：
@@ -151,20 +212,7 @@ Label名称字面成立测试（选择前必做）：
 候选Label（顺序不代表最终正确性）：
 {json.dumps(candidate_cards, ensure_ascii=False)}
 
-evidence.quote每条不超过60字，必须逐字复制连续原文，不得改写、拼接、填空、推导或补写。reason用1至2句话、不超过120字，概括最终选择或置空依据。
-
-只输出一个JSON对象：
-{{
-  "selected": ["C01", "C05"],
-  "evidence": {{
-    "C01": {{"source": "stem", "quote": "题目连续原文"}},
-    "C05": {{"source": "analysis", "quote": "解析连续原文"}}
-  }},
-  "context_insufficient": false,
-  "need_expand_recall": false,
-  "reason": "当前设问直接考查……"
-}}
-不要输出Markdown或JSON之外的内容。"""
+{output_instructions}"""
     return prompt, code_map
 
 
