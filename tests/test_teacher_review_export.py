@@ -120,6 +120,35 @@ def test_export_teacher_review_packages_separates_positive_and_boundary(tmp_path
         for label_id in ("L1", "L2", "L3")
         for index, score in enumerate((0.0, 0.2, 0.65, 0.75, 0.90), 1)
     ]
+    positive_tasks = [
+        {
+            "pair_id": row["task_id"],
+            "question_id": row["question_id"],
+            "label_id": row["label_id"],
+            "unit_type": "standalone",
+            "stem": f"{row['question_id']}题干",
+        }
+        for row in positive_results
+    ]
+    image_context = [
+        {
+            "question_id": row["question_id"],
+            "parent_id": row["question_id"],
+            "unit_type": "standalone",
+            "stem_image_url": f"https://x/{row['question_id']}.png",
+            "analysis_image_url": f"https://x/{row['question_id']}-analysis.png",
+        }
+        for row in positive_results
+    ] + [
+        {
+            "question_id": f"NQ{index}",
+            "parent_id": f"NQ{index}",
+            "unit_type": "standalone",
+            "stem_image_url": f"https://x/NQ{index}.png",
+            "analysis_image_url": f"https://x/NQ{index}-analysis.png",
+        }
+        for index in range(1, 4)
+    ]
     hard_samples = [
         {
             "pair_id": "HN1",
@@ -158,6 +187,8 @@ def test_export_teacher_review_packages_separates_positive_and_boundary(tmp_path
         ("strategies", strategies),
         ("metrics", metrics),
         ("corrected", corrected),
+        ("positive_tasks", positive_tasks),
+        ("image_context", image_context),
         ("positive", positive_results),
         ("hard_samples", hard_samples),
         ("hard_results", hard_results),
@@ -170,8 +201,10 @@ def test_export_teacher_review_packages_separates_positive_and_boundary(tmp_path
     report = export_teacher_review_packages(
         labels_path=paths["labels"],
         strategies_path=paths["strategies"],
+        positive_tasks_path=paths["positive_tasks"],
         positive_results_path=paths["positive"],
         positive_per_label_path=paths["metrics"],
+        image_context_path=paths["image_context"],
         corrected_assessments_path=paths["corrected"],
         hard_negative_samples_path=paths["hard_samples"],
         hard_negative_results_path=paths["hard_results"],
@@ -194,10 +227,20 @@ def test_export_teacher_review_packages_separates_positive_and_boundary(tmp_path
     assert positive["positive_coverage"]["matched_over_total"] == "2/5"
     assert len(positive["representative_positive_ds_false"]) == 3
     assert len(positive["representative_positive_ds_true"]) == 2
+    positive_item = positive["representative_positive_ds_false"][0]
+    assert positive_item["label_path"] == "知识点@正样本问题"
+    assert positive_item["parent_id"] == positive_item["question_id"]
+    assert positive_item["question_type"] == "standalone"
+    assert positive_item["stem"].endswith("题干")
+    assert positive_item["stem_image_url"].startswith("https://x/")
+    assert positive_item["analysis_image_url"].endswith("-analysis.png")
 
     boundary = json.loads(boundary_files[0].read_text(encoding="utf-8"))
     assert boundary["label"]["label_id"] == "L2"
     assert boundary["corrected_boundary_summary"]["true_boundary_errors"] == 6
     assert boundary["representative_target_excluded_after_colabel"][0]["question_id"] == "NQ1"
+    assert boundary["representative_target_excluded_after_colabel"][0]["parent_id"] == "NQ1"
+    assert boundary["representative_target_excluded_after_colabel"][0]["stem"] == ""
+    assert boundary["representative_target_excluded_after_colabel"][0]["stem_image_url"] == "https://x/NQ1.png"
     assert boundary["representative_reasonable_colabel"][0]["question_id"] == "NQ2"
     assert boundary["representative_first_stage_target_rejected"][0]["question_id"] == "NQ3"

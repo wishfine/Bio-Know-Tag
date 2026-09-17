@@ -152,12 +152,30 @@ def _stratified_positive_sample(
     return chosen
 
 
-def _question_reference(row: dict[str, Any]) -> dict[str, Any]:
+def _question_reference(
+    row: dict[str, Any],
+    task: dict[str, Any],
+    image_context: dict[str, Any],
+    label: dict[str, Any],
+) -> dict[str, Any]:
     score = float(row["relevance_score"])
+    question_id = str(row["question_id"])
     return {
-        "question_id": str(row["question_id"]),
-        "model_match": score >= 0.70,
+        "label_name": str(label.get("label_name") or ""),
+        "label_path": str(label.get("label_path") or ""),
+        "question_id": question_id,
+        "parent_id": str(
+            image_context.get("parent_id")
+            or task.get("parent_id")
+            or question_id
+        ),
+        "question_type": str(task.get("unit_type") or "unknown"),
+        "model_match": bool(row.get("match", score >= 0.70)),
         "model_score": score,
+        "stem": str(task.get("stem") or ""),
+        "stem_image_url": str(image_context.get("stem_image_url") or ""),
+        "analysis_image_url": str(image_context.get("analysis_image_url") or ""),
+        "task_id": str(row["task_id"]),
         "score_band": _score_band(score),
     }
 
@@ -228,11 +246,29 @@ def _boundary_reference(
     row: dict[str, Any],
     samples: dict[str, dict[str, Any]],
     first_stage: dict[str, dict[str, Any]],
+    image_contexts: dict[str, dict[str, Any]],
+    target_label: dict[str, Any],
 ) -> dict[str, Any]:
     sample = samples[str(row["task_id"])]
     first = first_stage[str(row["task_id"])]
+    question_id = str(row["question_id"])
+    context = image_contexts.get(question_id, {})
     return {
-        "question_id": str(row["question_id"]),
+        "label_name": str(target_label.get("label_name") or ""),
+        "label_path": str(target_label.get("label_path") or ""),
+        "question_id": question_id,
+        "parent_id": str(
+            context.get("parent_id")
+            or sample.get("parent_id")
+            or question_id
+        ),
+        "question_type": str(sample.get("unit_type") or "unknown"),
+        "model_match": bool(first.get("match", True)),
+        "model_score": float(first["relevance_score"]),
+        "stem": str(sample.get("stem") or ""),
+        "stem_image_url": str(context.get("stem_image_url") or ""),
+        "analysis_image_url": str(context.get("analysis_image_url") or ""),
+        "task_id": str(row["task_id"]),
         "source_label_ids": [str(value) for value in sample.get("source_label_ids") or []],
         "source_label_names": list(sample.get("source_label_names") or []),
         "first_stage_target_score": float(first["relevance_score"]),
@@ -244,8 +280,10 @@ def export_teacher_review_packages(
     *,
     labels_path: str | Path,
     strategies_path: str | Path,
+    positive_tasks_path: str | Path,
     positive_results_path: str | Path,
     positive_per_label_path: str | Path,
+    image_context_path: str | Path,
     corrected_assessments_path: str | Path,
     hard_negative_samples_path: str | Path,
     hard_negative_results_path: str | Path,
@@ -266,6 +304,12 @@ def export_teacher_review_packages(
     metrics = {
         str(row["label_id"]): row for row in _read_jsonl(positive_per_label_path)
     }
+    positive_tasks = {
+        str(row["pair_id"]): row for row in _read_jsonl(positive_tasks_path)
+    }
+    image_contexts = {
+        str(row["question_id"]): row for row in _read_jsonl(image_context_path)
+    }
     corrected = {
         str(row["label_id"]): row for row in _read_jsonl(corrected_assessments_path)
     }
@@ -283,6 +327,13 @@ def export_teacher_review_packages(
     }
     if set(labels) != set(metrics) or set(labels) != set(corrected):
         raise ValueError("labels, positive metrics, and corrected assessments differ")
+    positive_result_ids = {
+        str(row["task_id"])
+        for rows in positive_by_label.values()
+        for row in rows
+    }
+    if positive_result_ids != set(positive_tasks):
+        raise ValueError("positive tasks/results task IDs differ")
 
     old_problem_ids = set()
     risks = {}
@@ -332,13 +383,23 @@ def export_teacher_review_packages(
             "positive_risk_level": risks[label_id],
             "positive_coverage": _positive_summary(rows),
             "representative_positive_ds_false": [
-                _question_reference(row)
+                _question_reference(
+                    row,
+                    positive_tasks[str(row["task_id"])],
+                    image_contexts.get(str(row["question_id"]), {}),
+                    label,
+                )
                 for row in _stratified_positive_sample(
                     false_rows, matched=False, limit=examples_per_side
                 )
             ],
             "representative_positive_ds_true": [
-                _question_reference(row)
+                _question_reference(
+                    row,
+                    positive_tasks[str(row["task_id"])],
+                    image_contexts.get(str(row["question_id"]), {}),
+                    label,
+                )
                 for row in _stratified_positive_sample(
                     true_rows, matched=True, limit=examples_per_side
                 )
@@ -401,19 +462,25 @@ def export_teacher_review_packages(
             )
         }
         payload["representative_target_excluded_after_colabel"] = [
-            _boundary_reference(row, hard_samples, hard_results)
+            _boundary_reference(
+                row, hard_samples, hard_results, image_contexts, labels[label_id]
+            )
             for row in _round_robin_source_sample(
                 decision_rows("目标Label边界过宽"), hard_samples, examples_per_side
             )
         ]
         payload["representative_reasonable_colabel"] = [
-            _boundary_reference(row, hard_samples, hard_results)
+            _boundary_reference(
+                row, hard_samples, hard_results, image_contexts, labels[label_id]
+            )
             for row in _round_robin_source_sample(
                 decision_rows("合理共标"), hard_samples, examples_per_side
             )
         ]
         payload["representative_source_label_suspect"] = [
-            _boundary_reference(row, hard_samples, hard_results)
+            _boundary_reference(
+                row, hard_samples, hard_results, image_contexts, labels[label_id]
+            )
             for row in _round_robin_source_sample(
                 decision_rows("来源Label不足以描述该题", "两侧Label均不充分"),
                 hard_samples,
@@ -423,23 +490,40 @@ def export_teacher_review_packages(
         rejected = _quantile_sample(
             hard_rejected_by_target.get(label_id, []), examples_per_side
         )
-        payload["representative_first_stage_target_rejected"] = [
-            {
-                "question_id": str(row["question_id"]),
-                "target_score": float(row["relevance_score"]),
-                "source_label_ids": [
-                    str(value)
-                    for value in hard_samples[str(row["task_id"])].get(
-                        "source_label_ids"
-                    )
-                    or []
-                ],
-                "source_label_names": list(
-                    hard_samples[str(row["task_id"])].get("source_label_names") or []
-                ),
-            }
-            for row in rejected
-        ]
+        rejected_references = []
+        for row in rejected:
+            task_id = str(row["task_id"])
+            sample = hard_samples[task_id]
+            question_id = str(row["question_id"])
+            context = image_contexts.get(question_id, {})
+            rejected_references.append(
+                {
+                    "label_name": str(labels[label_id].get("label_name") or ""),
+                    "label_path": str(labels[label_id].get("label_path") or ""),
+                    "question_id": question_id,
+                    "parent_id": str(
+                        context.get("parent_id")
+                        or sample.get("parent_id")
+                        or question_id
+                    ),
+                    "question_type": str(sample.get("unit_type") or "unknown"),
+                    "model_match": bool(row.get("match", False)),
+                    "model_score": float(row["relevance_score"]),
+                    "stem": str(sample.get("stem") or ""),
+                    "stem_image_url": str(context.get("stem_image_url") or ""),
+                    "analysis_image_url": str(
+                        context.get("analysis_image_url") or ""
+                    ),
+                    "task_id": task_id,
+                    "source_label_ids": [
+                        str(value) for value in sample.get("source_label_ids") or []
+                    ],
+                    "source_label_names": list(
+                        sample.get("source_label_names") or []
+                    ),
+                }
+            )
+        payload["representative_first_stage_target_rejected"] = rejected_references
         path = boundary_dir / _safe_filename(index, labels[label_id])
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
@@ -461,4 +545,3 @@ def export_teacher_review_packages(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     return report
-

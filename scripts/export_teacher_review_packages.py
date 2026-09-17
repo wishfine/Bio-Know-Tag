@@ -15,8 +15,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels", type=Path, default=Path("configs/labels.jsonl"))
     parser.add_argument("--strategies", type=Path, required=True)
+    parser.add_argument("--positive-tasks", type=Path, required=True)
     parser.add_argument("--positive-results", type=Path, required=True)
     parser.add_argument("--positive-per-label", type=Path, required=True)
+    parser.add_argument("--image-context", type=Path, required=True)
     parser.add_argument("--corrected-assessments", type=Path, required=True)
     parser.add_argument("--hard-negative-samples", type=Path, required=True)
     parser.add_argument("--hard-negative-results", type=Path, required=True)
@@ -33,8 +35,10 @@ def main() -> int:
     report = export_teacher_review_packages(
         labels_path=args.labels,
         strategies_path=args.strategies,
+        positive_tasks_path=args.positive_tasks,
         positive_results_path=args.positive_results,
         positive_per_label_path=args.positive_per_label,
+        image_context_path=args.image_context,
         corrected_assessments_path=args.corrected_assessments,
         hard_negative_samples_path=args.hard_negative_samples,
         hard_negative_results_path=args.hard_negative_results,
