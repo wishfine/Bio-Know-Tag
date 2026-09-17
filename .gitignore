@@ -6,6 +6,7 @@ __pycache__/
 runtime/*
 !runtime/.gitkeep
 received/
+output/positive-review-by-label*/
 source/raw/*
 !source/raw/README.md
 .DS_Store
