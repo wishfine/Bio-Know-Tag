@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v8.6-v83-reason-last"
+PROMPT_VERSION = "candidate-adjudication-v9-generalized-specificity"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -110,24 +110,26 @@ def build_adjudication_prompt(
 
 任务流程（内部完成判断，只输出简短结论依据，不输出详细思考过程）：
 A. 先用当前设问、选项判断、答案和解析列出“完成本题必须调用的知识”。
-B. 对每个拟选Label逐项通过下面五道硬门槛。
+B. 对每个拟选Label逐项通过下面七道硬门槛。
 C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该被选”的证据。只要任意一道不能确定通过，就从selected删除。
 
-五道硬门槛（必须全部通过）：
+七道硬门槛（必须全部通过）：
 1. 直接考查：正确解答当前设问确实需要该Label；仅出现于材料、父题背景、工具名或弱联想不通过。错误选项只有在判断其错误必须调用该知识时才算直接考查。
 2. 精确定义：题目考点完整落入definition和core_concepts，不得因共享一个名词就扩张Label。
 3. 考查维度：原理、现象、实验操作、实验设计、应用、方法、结论、发展史是不同维度，不能互相替代。common_assessments可帮助判定维度，但不能单独证明应入选。
-4. 边界否决：distinctions是硬否决条件；只要题目落在它排除的一侧，立即拒绝。
-5. 必要性反问：如果学生完全不会该Label，仍能依靠其他知识完整解决当前设问，则该Label不是必要考点，拒绝。
+4. 对象与限定词：Label名和释义中的物种、人群/疾病、组织/细胞、样品/环境、实验对象等限定必须有题内直接证据。只是共享底层机制不足以迁移具体Label；对象不同即拒绝具体限定Label。
+5. 生命层级与作用通道：分子、细胞器、细胞、组织、器官、个体、种群、群落、生态系统之间不得因现象相似就互相替代；实际经过的结构或通道必须与Label所定义的过程一致。
+6. 边界否决：distinctions是硬否决条件；只要题目落在它排除的一侧，立即拒绝。实验/方法Label还必须真正考实验目的、步骤、变量、现象、误差或方案评价，不得由同模块概念触发。
+7. 必要性反问：如果学生完全不会该Label，仍能依靠其他知识完整解决当前设问，则该Label不是必要考点，拒绝。
 
 选择规则：
-6. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
-7. 合理多标可以保留，但每一个Label都必须独立通过全部五道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
-8. 反证复核失败的候选直接从selected删除；reason只概括最终选择或置空的依据，不逐项输出被拒绝候选或详细思考过程。
-9. 题目有明确生物考点，但没有任何候选能通过五道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
-10. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
-11. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
-12. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
+8. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
+9. 合理多标可以保留，但每一个Label都必须独立通过全部七道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
+10. 反证复核失败的候选直接从selected删除；reason只概括最终选择或置空的依据，不逐项输出被拒绝候选或详细思考过程。
+11. 题目有明确生物考点，但没有任何候选能通过七道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
+12. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
+13. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
+14. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
 
 只能返回C01等短代码，不能抄写长label_id。
 
@@ -428,6 +430,10 @@ def run_adjudication(
     selected_rank_distribution: Counter[str] = Counter()
     selected_from_tail = 0
     questions_using_tail = 0
+    selected_from_rank_21_plus = 0
+    questions_using_rank_21_plus = 0
+    selected_from_rank_26_30 = 0
+    questions_using_rank_26_30 = 0
     max_selected_rank = 0
     need_expand = 0
     none_count = 0
@@ -453,6 +459,8 @@ def run_adjudication(
             }
             selected_labels = []
             used_tail = False
+            used_rank_21_plus = False
+            used_rank_26_30 = False
             for code in parsed["selected"]:
                 label_id = code_map[code]
                 label = labels_by_id[label_id]
@@ -463,6 +471,10 @@ def run_adjudication(
                     max_selected_rank = max(max_selected_rank, rank)
                 used_tail = used_tail or 21 <= rank <= 25
                 selected_from_tail += int(21 <= rank <= 25)
+                used_rank_21_plus = used_rank_21_plus or rank >= 21
+                selected_from_rank_21_plus += int(rank >= 21)
+                used_rank_26_30 = used_rank_26_30 or 26 <= rank <= 30
+                selected_from_rank_26_30 += int(26 <= rank <= 30)
                 selected_labels.append(
                     {
                         "label_id": label_id,
@@ -478,6 +490,8 @@ def run_adjudication(
                 key=lambda item: (item["candidate_rank"], item["label_id"])
             )
             questions_using_tail += int(used_tail)
+            questions_using_rank_21_plus += int(used_rank_21_plus)
+            questions_using_rank_26_30 += int(used_rank_26_30)
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
             none_count += int(parsed["none_of_candidates"])
@@ -485,14 +499,19 @@ def run_adjudication(
             dropped_unknown_codes = parsed.get("unknown_selected_codes_dropped", [])
             unknown_selected_codes_dropped_count += len(dropped_unknown_codes)
             questions_with_unknown_selected_codes += int(bool(dropped_unknown_codes))
+            text_content_missing = not str(unit.get("stem") or "").strip() and not str(
+                unit.get("parent_stem") or ""
+            ).strip()
             needs_review = bool(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
+                or text_content_missing
             )
             usable_for_training = bool(
                 selected_labels
                 and not parsed["need_expand_recall"]
                 and not parsed["context_insufficient"]
+                and not text_content_missing
             )
             usable_for_training_count += int(usable_for_training)
             if not selected_labels:
@@ -501,6 +520,8 @@ def run_adjudication(
                 training_filter_reasons["need_expand_recall"] += 1
             if parsed["context_insufficient"]:
                 training_filter_reasons["context_insufficient"] += 1
+            if text_content_missing:
+                training_filter_reasons["missing_question_text"] += 1
             prediction = {
                 "question_id": question_id,
                 "parent_id": unit.get("parent_id", question_id),
@@ -513,6 +534,7 @@ def run_adjudication(
                 "none_of_candidates": parsed["none_of_candidates"],
                 "need_expand_recall": parsed["need_expand_recall"],
                 "context_insufficient": parsed["context_insufficient"],
+                "text_content_missing": text_content_missing,
                 "needs_review": needs_review,
                 "usable_for_training": usable_for_training,
                 "candidate_count": len(candidates),
@@ -526,7 +548,7 @@ def run_adjudication(
                 json.dumps(prediction, ensure_ascii=False, sort_keys=True)
             )
             output.write("\n")
-            if used_tail:
+            if used_rank_21_plus:
                 tail_output.write(
                     json.dumps(
                         {
@@ -656,6 +678,10 @@ def run_adjudication(
         "max_selected_candidate_rank": max_selected_rank,
         "selected_from_rank_21_25": selected_from_tail,
         "questions_using_rank_21_25": questions_using_tail,
+        "selected_from_rank_21_plus": selected_from_rank_21_plus,
+        "questions_using_rank_21_plus": questions_using_rank_21_plus,
+        "selected_from_rank_26_30": selected_from_rank_26_30,
+        "questions_using_rank_26_30": questions_using_rank_26_30,
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "context_insufficient": context_insufficient_count,

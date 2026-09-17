@@ -121,18 +121,21 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v86_prompt_restores_v83_layout_and_puts_reason_last():
+def test_v9_prompt_adds_generalized_specificity_gates_and_puts_reason_last():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v8.6-v83-reason-last"
+    assert PROMPT_VERSION == "candidate-adjudication-v9-generalized-specificity"
     assert "错标的代价远高于漏标" in prompt
-    assert "五道硬门槛" in prompt
+    assert "七道硬门槛" in prompt
     assert "反证复核" in prompt
     assert "只要任意一道不能确定通过" in prompt
     assert "不得因为研究对象、题干关键词或所属章节相同" in prompt
+    assert "对象与限定词" in prompt
+    assert "生命层级与作用通道" in prompt
+    assert "共享底层机制不足以迁移具体Label" in prompt
     assert "施肥过多" not in prompt
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
@@ -145,6 +148,56 @@ def test_v86_prompt_restores_v83_layout_and_puts_reason_last():
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert schema.index('"need_expand_recall"') < schema.index('"reason"')
     assert "evidence" not in prompt
+
+
+def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    unit = {**_unit(), "stem": "", "parent_stem": ""}
+    units_path.write_text(json.dumps(unit, ensure_ascii=False) + "\n", encoding="utf-8")
+    candidates_path.write_text(
+        json.dumps({"question_id": "q1", "candidates": [_candidate(1)]}) + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = json.dumps(
+            {
+                "reason": "解析中存在相关知识。",
+                "selected": ["C01"],
+                "need_expand_recall": False,
+                "context_insufficient": False,
+            },
+            ensure_ascii=False,
+        )
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+    )
+    prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
+    assert prediction["text_content_missing"] is True
+    assert prediction["usable_for_training"] is False
+    assert prediction["needs_review"] is True
+    assert report["training_filter_reasons"]["missing_question_text"] == 1
+    assert report["usable_for_training"] == 0
 
 
 def test_prompt_restores_single_v83_question_object():
@@ -309,22 +362,22 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     labels_path = tmp_path / "labels.jsonl"
     output = tmp_path / "judge"
     units_path.write_text(json.dumps(_unit(), ensure_ascii=False) + "\n", encoding="utf-8")
-    candidates = [_candidate(index) for index in range(1, 26)]
+    candidates = [_candidate(index) for index in range(1, 31)]
     labels = {
         f"L{index}": _label(f"L{index}", f"标签{index}")
-        for index in range(1, 26)
+        for index in range(1, 31)
     }
     _, shuffled_code_map = build_adjudication_prompt(
         _unit(), candidates, labels
     )
-    code_for_l23 = next(
-        code for code, label_id in shuffled_code_map.items() if label_id == "L23"
+    code_for_l28 = next(
+        code for code, label_id in shuffled_code_map.items() if label_id == "L28"
     )
     candidates_path.write_text(
         json.dumps(
             {
                 "question_id": "q1",
-                "retrieval_version": "hybrid-v1-s18-d7-k25",
+                "retrieval_version": "hybrid-v1-s20-d10-k30",
                 "candidates": candidates,
             },
             ensure_ascii=False,
@@ -335,7 +388,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     labels_path.write_text(
         "".join(
             json.dumps(_label(f"L{index}", f"标签{index}"), ensure_ascii=False) + "\n"
-            for index in range(1, 26)
+            for index in range(1, 31)
         ),
         encoding="utf-8",
     )
@@ -343,8 +396,8 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     class Response:
         content = json.dumps(
             {
-                "reason": "当前题目直接考查标签23。",
-                "selected": [code_for_l23],
+                "reason": "当前题目直接考查标签28。",
+                "selected": [code_for_l28],
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -384,20 +437,24 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     )
 
     prediction = json.loads((output / "predictions.jsonl").read_text(encoding="utf-8"))
-    assert prediction["selected_labels"][0]["label_id"] == "L23"
-    assert prediction["reason"] == "当前题目直接考查标签23。"
-    assert prediction["selected_labels"][0]["candidate_rank"] == 23
+    assert prediction["selected_labels"][0]["label_id"] == "L28"
+    assert prediction["reason"] == "当前题目直接考查标签28。"
+    assert prediction["selected_labels"][0]["candidate_rank"] == 28
     assert "rejected_risky_labels" not in prediction
     assert "output_conflict" not in prediction
     assert "output_normalization" not in prediction
-    assert prediction["selected_labels"][0]["label_path"] == "知识点@模块@标签23"
-    assert prediction["candidate_count"] == 25
-    assert prediction["retrieval_version"] == "hybrid-v1-s18-d7-k25"
+    assert prediction["selected_labels"][0]["label_path"] == "知识点@模块@标签28"
+    assert prediction["candidate_count"] == 30
+    assert prediction["retrieval_version"] == "hybrid-v1-s20-d10-k30"
     assert report["success"] == 1
-    assert report["selected_candidate_rank_distribution"] == {"23": 1}
-    assert report["max_selected_candidate_rank"] == 23
-    assert report["selected_from_rank_21_25"] == 1
-    assert report["questions_using_rank_21_25"] == 1
+    assert report["selected_candidate_rank_distribution"] == {"28": 1}
+    assert report["max_selected_candidate_rank"] == 28
+    assert report["selected_from_rank_21_25"] == 0
+    assert report["questions_using_rank_21_25"] == 0
+    assert report["selected_from_rank_21_plus"] == 1
+    assert report["questions_using_rank_21_plus"] == 1
+    assert report["selected_from_rank_26_30"] == 1
+    assert report["questions_using_rank_26_30"] == 1
     assert "rejected_risky_count" not in report
     assert "questions_with_rejected_risky" not in report
     assert "output_conflict" not in report
@@ -427,7 +484,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert evidence["retry_errors"][0]["error_type"] == "ConnectionResetError"
     tail = json.loads((output / "tail_selected.jsonl").read_text(encoding="utf-8"))
     assert tail["question"]["question_id"] == "q1"
-    assert tail["prediction"]["selected_labels"][0]["candidate_rank"] == 23
+    assert tail["prediction"]["selected_labels"][0]["candidate_rank"] == 28
 
 
 def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):

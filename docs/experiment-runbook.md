@@ -1329,6 +1329,92 @@ printf 'V86_RUN=%s PID=%s\n' "$V86_RUN" "$PID"
 
 核心比较：v8.6与v8.3的Label集合一致率、v8.6与v8.5的一致率、可训练/空标/context/expand，以及施肥烧苗、固定化脲酶、ABA-Cl⁻、基因连锁、水跨膜、新冠疫苗等回归题。
 
+### 24.4 V9通用限定门槛 + Top30候选消融
+
+V8.6的4道高置信硬错共性不是某个题型的特例，而是模型只验证“概念相关”，未严格验证具体限定：
+
+- 实验Label与同模块原理题的任务形态不一致；
+- 人类具体疾病与其他物种的同机制性状对象不一致；
+- 器官开口的气体交换与跨细胞膜运输的生命层级/作用通道不一致；
+- 河流物种调查与土壤小动物调查的样品和环境限定不一致。
+
+V9不写入这4道题或具体答案，只把共性提炼为两道新硬门槛：`Label对象与限定词必须完整命中`、`生命层级与实际作用通道必须一致`；同时强化实验/方法Label的任务形态否决。候选排列仍固定使用V8.3种子，避免Prompt版本变化同时改变位置。
+
+训练物化增加硬过滤：`stem`与`parent_stem`同时为空的题即使DS选出Label，也设`text_content_missing=true`、`usable_for_training=false`，并计入`missing_question_text`。
+
+先在原300题上重建Top30，不变题目、Label表、Dense模型和DS：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+DENSE_PY='/local_data/zhangyonglin/conda_envs/bio-know-tag-dense/bin/python'
+DENSE_MODEL='/local_data/zhangyonglin/data/bio-know-tag/models/bge-small-zh-v1.5'
+
+V9_SPARSE30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v9-audit-sparse30"
+mkdir -p "$V9_SPARSE30_RUN"
+PYTHONPATH=src python scripts/run_sparse_retrieval.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V9_SPARSE30_RUN" \
+  --top-k 30
+
+V9_DENSE30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v9-audit-dense30"
+mkdir -p "$V9_DENSE30_RUN"
+CUDA_VISIBLE_DEVICES=0 PYTHONPATH=src "$DENSE_PY" scripts/run_dense_retrieval.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V9_DENSE30_RUN" \
+  --model "$DENSE_MODEL" \
+  --device cuda:0 \
+  --top-k 30 \
+  --batch-size 128 \
+  --local-files-only
+
+V9_HYBRID30_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v9-audit-hybrid-s20-d10-k30"
+mkdir -p "$V9_HYBRID30_RUN"
+PYTHONPATH=src python scripts/fuse_retrieval_candidates.py \
+  --sparse-candidates "$V9_SPARSE30_RUN/candidates.jsonl" \
+  --dense-candidates "$V9_DENSE30_RUN/candidates.jsonl" \
+  --run-dir "$V9_HYBRID30_RUN" \
+  --top-k 30 \
+  --sparse-quota 20 \
+  --dense-quota 10
+
+printf '%s\n' "$V9_HYBRID30_RUN" > runtime/LATEST_V9_HYBRID30_RUN
+python -m json.tool "$V9_HYBRID30_RUN/report.json"
+```
+
+使用V9精判Top30：
+
+```bash
+V9_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v9-top30"
+mkdir -p "$V9_RUN"
+printf '%s\n' "$V9_RUN" > runtime/LATEST_ADJUDICATION_V9_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V9_HYBRID30_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V9_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$V9_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V9_RUN/pid"
+printf 'V9_RUN=%s PID=%s\n' "$V9_RUN" "$PID"
+```
+
+验收时先看`candidate_count_distribution={"30":300}`和`prompt_version=candidate-adjudication-v9-generalized-specificity`；再比较V8.6的4道硬错、新墖候选第26–30名的实际选中数、空标/expand和可训练题数。保守增加无妨，但不允许因Top30或新Prompt增加新的明确错标。
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。
