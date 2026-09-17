@@ -1823,3 +1823,46 @@ du -sh "$REVIEW_EXPORT"
 ```
 
 验收值：`labels_exported=458`、`labels_with_questions=458`、`questions_exported=179568`；目录中共460个JSON（458个Label文件+`index.json`+`report.json`）。当前数据预计占用约355MB。
+
+## 30. 导出老师复核题号包
+
+该导出不调用DS，只从已有正样本和校正边界实验中选取代表题号。输出包含两个同级目录：
+
+- `positive_issue_135/`：严格复现正样本阶段的135个问题Label；
+- `boundary_risk_additional/`：排除旧135后，正样本不少于300、有效负样本不少于20、校正边界排除率大于15%的新增高风险Label。
+
+每个Label单独一个JSON。正样本的False/True题各最多10道，按分数档与分位点确定性抽样；负样本证据按source Label轮转抽样，避免10道题全来自同一混淆对。
+
+```bash
+STANDALONE_FULL_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_STANDALONE_FULL_RUN)"
+POSITIVE_ANALYSIS_RUN="$(cat runtime/LATEST_STANDALONE_POSITIVE_ANALYSIS_RUN)"
+HARD_NEG_SAMPLE_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_SAMPLE_RUN)"
+HARD_NEG_DS_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_DS_RUN)"
+COLABEL_V2_RUN="$(cat runtime/LATEST_COLABEL_V2_RUN)"
+CORRECTED_RUN="$(cat runtime/LATEST_CORRECTED_BOUNDARY_RUN)"
+
+TEACHER_REVIEW_RUN="/local_data/zhangyonglin/data/bio-know-tag/teacher-review-$(date +%Y%m%d-%H%M%S)"
+
+PYTHONPATH=src python scripts/export_teacher_review_packages.py \
+  --labels configs/labels.jsonl \
+  --strategies configs/label_strategies.review2.jsonl \
+  --positive-results "$STANDALONE_FULL_RUN/results.jsonl" \
+  --positive-per-label "$POSITIVE_ANALYSIS_RUN/per_label.jsonl" \
+  --corrected-assessments "$CORRECTED_RUN/label_assessments.jsonl" \
+  --hard-negative-samples "$HARD_NEG_SAMPLE_RUN/hard_negative_samples.jsonl" \
+  --hard-negative-results "$HARD_NEG_DS_RUN/results.jsonl" \
+  --colabel-results "$COLABEL_V2_RUN/results.jsonl" \
+  --output-dir "$TEACHER_REVIEW_RUN" \
+  --examples-per-side 10 \
+  --high-boundary-threshold 0.15 \
+  --min-positive-count 300 \
+  --min-valid-negative-count 20
+
+printf '%s\n' "$TEACHER_REVIEW_RUN" > runtime/LATEST_TEACHER_REVIEW_RUN
+python -m json.tool "$TEACHER_REVIEW_RUN/report.json"
+find "$TEACHER_REVIEW_RUN/positive_issue_135" -type f -name '*.json' | wc -l
+find "$TEACHER_REVIEW_RUN/boundary_risk_additional" -type f -name '*.json' | wc -l
+du -sh "$TEACHER_REVIEW_RUN"
+```
+
+按当前正式数据，预期两个文件数分别是135和77。长尾Label若False或True可用题少于10道，导出实际可用数量，不重复题号补齐10道。
