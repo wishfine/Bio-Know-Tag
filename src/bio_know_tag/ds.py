@@ -108,6 +108,16 @@ class DSClient:
         if delay > 0:
             time.sleep(delay)
 
+    def _defer_retry_slot(self) -> None:
+        """Keep a full interval after a failed request before retrying."""
+        if not self.request_interval:
+            return
+        with self._request_slot_lock:
+            self._next_request_time = max(
+                self._next_request_time,
+                time.monotonic() + self.request_interval,
+            )
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -170,6 +180,8 @@ class DSClient:
                         "error": str(exc),
                     }
                 )
+                if attempt < self.retries:
+                    self._defer_retry_slot()
                 if attempt < self.retries and self.retry_delay:
                     delay = self.retry_delay * (2 ** (attempt - 1))
                     time.sleep(delay * random.uniform(0.8, 1.2))

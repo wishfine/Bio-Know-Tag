@@ -1490,6 +1490,47 @@ printf 'V91_RUN=%s PID=%s\n' "$V91_RUN" "$PID"
 
 验收时要求`prompt_version=candidate-adjudication-v9.1-scope-evidence`，并重点复核4道硬错题。同时检查每个`selected_labels[]`都已物化`evidence`，不将缺少原文证据的输出直接用于训练。
 
+### V9.2 Label名称字面成立+锚定证据
+
+V9.1在300题上修正4道硬错中的3道，但仍将果蝇眼色迁移到“人类红绿色盲症”；同时自由文本evidence仅约58%可在题目字段中直接找到。V9.2增加：
+
+- `本题直接考查【label_name】`的字面成立测试，禁止通过类比、共享机制或对象迁移选择具体Label；
+- evidence改为`source + quote`，`source`只能是`parent_stem/stem/options/answer_text/analysis`；
+- 程序对quote做Unicode和空白归一化后的连续子串校验，未通过的题标记`unverified_evidence`并禁止进入训练；
+- `selected`非空但`context_insufficient=true`时，按“保留已确定安全Label”规则归一为false，并记录归一化计数。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V9_HYBRID30_RUN="$(cat runtime/LATEST_V9_HYBRID30_RUN)"
+V92_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v92-top30"
+
+mkdir -p "$V92_RUN"
+printf '%s\n' "$V92_RUN" > runtime/LATEST_ADJUDICATION_V92_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V9_HYBRID30_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V92_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 768 \
+  > "$V92_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V92_RUN/pid"
+printf 'V92_RUN=%s PID=%s\n' "$V92_RUN" "$PID"
+```
+
+验收时要求`prompt_version=candidate-adjudication-v9.2-literal-name-anchored-evidence`，重点看果蝇题是否排除“人类红绿色盲症”、其余3道硬错是否保持正确、`questions_with_unverified_evidence`与`context_insufficient_forced_false`。
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。

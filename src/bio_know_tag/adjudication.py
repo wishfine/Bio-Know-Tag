@@ -5,7 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import time
+import unicodedata
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -16,8 +18,9 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9.1-scope-evidence"
+PROMPT_VERSION = "candidate-adjudication-v9.2-literal-name-anchored-evidence"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
+EVIDENCE_SOURCES = ("parent_stem", "stem", "options", "answer_text", "analysis")
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -48,6 +51,11 @@ def _file_sha256(path: str | Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _normalize_evidence_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"\s+", "", text).casefold()
 
 
 def _ensure_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
@@ -121,13 +129,18 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 6. 边界否决：distinctions是硬否决条件；只要题目落在它排除的一侧，立即拒绝。实验/方法Label还必须真正考实验目的、步骤、变量、现象、误差或方案评价，不得由同模块概念触发。
 7. 必要性反问：如果学生完全不会该Label，仍能依靠其他知识完整解决当前设问，则该Label不是必要考点，拒绝。
 
+Label名称字面成立测试（选择前必做）：
+- 把完整label_name代入“本题直接考查【label_name】”。
+- 只有这句话对当前题目字面成立，且不需要“类比、类似、共享机制、可迁移、属于同类”等转换才能选择。
+- 题目只考通用机制而label_name指向特定疾病、物种、实验、材料或场景时，拒绝该具体Label，只能选通用Label。
+
 选择规则：
 8. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
 9. 合理多标可以保留，但每一个Label都必须独立通过全部七道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
-10. 每个selected都必须提供一条evidence。evidence必须是当前题干、选项、答案或解析中的简短原文，同时证明考点和Label所限定的对象、层级或作用通道。找不到直接原文证据就不得选择。
+10. 每个selected都必须提供一条可机器校验的evidence：source只能是parent_stem、stem、options、answer_text或analysis，quote必须是该字段中连续复制的简短原文。它必须同时证明考点和Label限定的对象、层级或作用通道。找不到就不得选择。
 11. 题目有明确生物考点，但没有任何候选能通过七道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
 12. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
-13. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
+13. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。因此selected非空时context_insufficient必须为false；缺失内容只影响其他潜在Label时，保留已确定Label即可。
 14. 非生物题或无有效设问：selected=[]，need_expand_recall=false，context_insufficient=false。
 
 只能返回C01等短代码，不能抄写长label_id。
@@ -138,12 +151,15 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 候选Label（顺序不代表最终正确性）：
 {json.dumps(candidate_cards, ensure_ascii=False)}
 
-evidence每条不超过60字，不得改写、推导或补写原文中没有的内容。reason用1至2句话、不超过120字，概括最终选择或置空依据，不罗列全部候选或输出详细思考过程。
+evidence.quote每条不超过60字，必须逐字复制连续原文，不得改写、拼接、填空、推导或补写。reason用1至2句话、不超过120字，概括最终选择或置空依据。
 
 只输出一个JSON对象：
 {{
   "selected": ["C01", "C05"],
-  "evidence": {{"C01": "题目原文", "C05": "题目原文"}},
+  "evidence": {{
+    "C01": {{"source": "stem", "quote": "题目连续原文"}},
+    "C05": {{"source": "analysis", "quote": "解析连续原文"}}
+  }},
   "context_insufficient": false,
   "need_expand_recall": false,
   "reason": "当前设问直接考查……"
@@ -203,21 +219,31 @@ def validate_adjudication_result(
     raw_evidence = value["evidence"]
     if not isinstance(raw_evidence, dict):
         raise ValueError("evidence must be an object keyed by selected code")
-    normalized_evidence: dict[str, str] = {}
+    normalized_evidence: dict[str, dict[str, str]] = {}
     for code in normalized:
         evidence = raw_evidence.get(code)
-        if not isinstance(evidence, str) or not evidence.strip():
-            raise ValueError(f"missing non-empty evidence for {code}")
-        evidence = evidence.strip()
-        if len(evidence) > 300:
+        if not isinstance(evidence, dict):
+            raise ValueError(f"missing evidence object for {code}")
+        source = evidence.get("source")
+        quote = evidence.get("quote")
+        if source not in EVIDENCE_SOURCES:
+            raise ValueError(f"invalid evidence source for {code}")
+        if not isinstance(quote, str) or not quote.strip():
+            raise ValueError(f"missing non-empty evidence quote for {code}")
+        quote = quote.strip()
+        if len(quote) > 300:
             raise ValueError(f"evidence for {code} is too long")
-        normalized_evidence[code] = evidence
+        normalized_evidence[code] = {"source": source, "quote": quote}
+    context_forced_false = bool(normalized and value["context_insufficient"])
     return {
         "reason": reason,
         "selected": normalized,
         "evidence": normalized_evidence,
         "unknown_selected_codes_dropped": unknown_codes,
-        "context_insufficient": value["context_insufficient"],
+        "context_insufficient": False
+        if normalized
+        else value["context_insufficient"],
+        "context_insufficient_forced_false": context_forced_false,
         "need_expand_recall": value["need_expand_recall"] or bool(unknown_codes),
         "none_of_candidates": not bool(normalized),
     }
@@ -452,6 +478,9 @@ def run_adjudication(
     need_expand = 0
     none_count = 0
     context_insufficient_count = 0
+    context_insufficient_forced_false_count = 0
+    unverified_evidence_items = 0
+    questions_with_unverified_evidence = 0
     unknown_selected_codes_dropped_count = 0
     questions_with_unknown_selected_codes = 0
     usable_for_training_count = 0
@@ -475,6 +504,7 @@ def run_adjudication(
             used_tail = False
             used_rank_21_plus = False
             used_rank_26_30 = False
+            used_unverified_evidence = False
             for code in parsed["selected"]:
                 label_id = code_map[code]
                 label = labels_by_id[label_id]
@@ -489,6 +519,18 @@ def run_adjudication(
                 selected_from_rank_21_plus += int(rank >= 21)
                 used_rank_26_30 = used_rank_26_30 or 26 <= rank <= 30
                 selected_from_rank_26_30 += int(26 <= rank <= 30)
+                evidence = parsed["evidence"][code]
+                evidence_source = evidence["source"]
+                evidence_quote = evidence["quote"]
+                source_text = str(unit.get(evidence_source) or "")
+                evidence_verified = bool(_normalize_evidence_text(evidence_quote)) and (
+                    _normalize_evidence_text(evidence_quote)
+                    in _normalize_evidence_text(source_text)
+                )
+                used_unverified_evidence = (
+                    used_unverified_evidence or not evidence_verified
+                )
+                unverified_evidence_items += int(not evidence_verified)
                 selected_labels.append(
                     {
                         "label_id": label_id,
@@ -498,7 +540,9 @@ def run_adjudication(
                         "sources": candidate.get("sources", []),
                         "sparse_rank": candidate.get("sparse_rank"),
                         "dense_rank": candidate.get("dense_rank"),
-                        "evidence": parsed["evidence"][code],
+                        "evidence_source": evidence_source,
+                        "evidence": evidence_quote,
+                        "evidence_verified": evidence_verified,
                     }
                 )
             selected_labels.sort(
@@ -507,10 +551,14 @@ def run_adjudication(
             questions_using_tail += int(used_tail)
             questions_using_rank_21_plus += int(used_rank_21_plus)
             questions_using_rank_26_30 += int(used_rank_26_30)
+            questions_with_unverified_evidence += int(used_unverified_evidence)
             selected_count_distribution[str(len(selected_labels))] += 1
             need_expand += int(parsed["need_expand_recall"])
             none_count += int(parsed["none_of_candidates"])
             context_insufficient_count += int(parsed["context_insufficient"])
+            context_insufficient_forced_false_count += int(
+                parsed.get("context_insufficient_forced_false", False)
+            )
             dropped_unknown_codes = parsed.get("unknown_selected_codes_dropped", [])
             unknown_selected_codes_dropped_count += len(dropped_unknown_codes)
             questions_with_unknown_selected_codes += int(bool(dropped_unknown_codes))
@@ -521,12 +569,14 @@ def run_adjudication(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
                 or text_content_missing
+                or used_unverified_evidence
             )
             usable_for_training = bool(
                 selected_labels
                 and not parsed["need_expand_recall"]
                 and not parsed["context_insufficient"]
                 and not text_content_missing
+                and not used_unverified_evidence
             )
             usable_for_training_count += int(usable_for_training)
             if not selected_labels:
@@ -537,6 +587,8 @@ def run_adjudication(
                 training_filter_reasons["context_insufficient"] += 1
             if text_content_missing:
                 training_filter_reasons["missing_question_text"] += 1
+            if used_unverified_evidence:
+                training_filter_reasons["unverified_evidence"] += 1
             prediction = {
                 "question_id": question_id,
                 "parent_id": unit.get("parent_id", question_id),
@@ -700,6 +752,9 @@ def run_adjudication(
         "need_expand_recall": need_expand,
         "none_of_candidates": none_count,
         "context_insufficient": context_insufficient_count,
+        "context_insufficient_forced_false": context_insufficient_forced_false_count,
+        "unverified_evidence_items": unverified_evidence_items,
+        "questions_with_unverified_evidence": questions_with_unverified_evidence,
         "unknown_selected_codes_dropped": unknown_selected_codes_dropped_count,
         "questions_with_unknown_selected_codes": questions_with_unknown_selected_codes,
         "usable_for_training": usable_for_training_count,
