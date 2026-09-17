@@ -136,6 +136,10 @@ def test_v9_prompt_adds_generalized_specificity_gates_and_puts_reason_last():
     assert "对象与限定词" in prompt
     assert "生命层级与作用通道" in prompt
     assert "共享底层机制不足以迁移具体Label" in prompt
+    assert "属于Label定义的必要条件" in prompt
+    assert "通用原理、规律和机制可以跨材料应用" in prompt
+    assert "题目明确考查跨层级因果关系时允许合理多标" in prompt
+    assert "对象不同即拒绝" not in prompt
     assert "施肥过多" not in prompt
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
