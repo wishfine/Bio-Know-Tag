@@ -1490,256 +1490,18 @@ printf 'V91_RUN=%s PID=%s\n' "$V91_RUN" "$PID"
 
 验收时要求`prompt_version=candidate-adjudication-v9.1-scope-evidence`，并重点复核4道硬错题。同时检查每个`selected_labels[]`都已物化`evidence`，不将缺少原文证据的输出直接用于训练。
 
-### V9.2 Label名称字面成立+锚定证据
+## 25. V9.1 + Top25 + 当前458内旧knw_ids
 
-V9.1在300题上修正4道硬错中的3道，但仍将果蝇眼色迁移到“人类红绿色盲症”；同时自由文本evidence仅约58%可在题目字段中直接找到。V9.2增加：
-
-- `本题直接考查【label_name】`的字面成立测试，禁止通过类比、共享机制或对象迁移选择具体Label；
-- evidence改为`source + quote`，`source`只能是`parent_stem/stem/options/answer_text/analysis`；
-- 程序对quote做Unicode和空白归一化后的连续子串校验，未通过的题标记`unverified_evidence`并禁止进入训练；
-- `selected`非空但`context_insufficient=true`时，按“保留已确定安全Label”规则归一为false，并记录归一化计数。
+主线固定使用V9.1 Prompt。候选为原混合召回Top25，再追加每题历史`knw_ids`中仍属于当前458的ID。旧ID不直接作为答案，仍交给DS精判；释义表外的旧ID删除，与Top25重复的ID去重。
 
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
 
-AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
-V9_HYBRID30_RUN="$(cat runtime/LATEST_V9_HYBRID30_RUN)"
-V92_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v92-top30"
-
-mkdir -p "$V92_RUN"
-printf '%s\n' "$V92_RUN" > runtime/LATEST_ADJUDICATION_V92_RUN
-
-nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
-  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
-  --candidates "$V9_HYBRID30_RUN/candidates.jsonl" \
-  --labels configs/labels.jsonl \
-  --run-dir "$V92_RUN" \
-  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
-  --model 'DeepSeek-V4-Flash' \
-  --workers 20 \
-  --timeout 300 \
-  --retries 5 \
-  --retry-delay 1 \
-  --request-interval 0 \
-  --max-tokens 768 \
-  > "$V92_RUN/nohup.log" 2>&1 &
-
-PID=$!
-printf '%s\n' "$PID" > "$V92_RUN/pid"
-printf 'V92_RUN=%s PID=%s\n' "$V92_RUN" "$PID"
-```
-
-验收时要求`prompt_version=candidate-adjudication-v9.2-literal-name-anchored-evidence`，重点看果蝇题是否排除“人类红绿色盲症”、其余3道硬错是否保持正确、`questions_with_unverified_evidence`与`context_insufficient_forced_false`。
-
-### V9.2b Top25 + 当前458内原题knw_ids
-
-后续主线不再默认使用纯Top30，改为原混合召回Top25加原题`legacy_knw_ids`。只追加仍存在于当前458 Label表的ID；释义表外的旧ID删除，与Top25重复的ID去重。旧ID只是候选，不直接当作最终标签。
-
-```bash
-cd /local_data/zhangyonglin/Bio-Know-Tag
-
-AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
 if test -f runtime/LATEST_UPDATED_LABEL_UNITS_RUN; then
   UNIT_RUN="$(cat runtime/LATEST_UPDATED_LABEL_UNITS_RUN)"
 else
   UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
 fi
-
-V92_LEGACY_CANDIDATES_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v92-top25-plus-legacy-candidates"
-mkdir -p "$V92_LEGACY_CANDIDATES_RUN"
-
-PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
-  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
-  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
-  --legacy-units "$UNIT_RUN/label_units.jsonl" \
-  --labels configs/labels.jsonl \
-  --run-dir "$V92_LEGACY_CANDIDATES_RUN"
-
-printf '%s\n' "$V92_LEGACY_CANDIDATES_RUN" \
-  > runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
-python -m json.tool "$V92_LEGACY_CANDIDATES_RUN/report.json"
-
-V92_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v92-top25-plus-legacy"
-mkdir -p "$V92_LEGACY_RUN"
-printf '%s\n' "$V92_LEGACY_RUN" \
-  > runtime/LATEST_ADJUDICATION_V92_TOP25_PLUS_LEGACY_RUN
-
-nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
-  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
-  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
-  --labels configs/labels.jsonl \
-  --run-dir "$V92_LEGACY_RUN" \
-  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
-  --model 'DeepSeek-V4-Flash' \
-  --workers 20 \
-  --timeout 300 \
-  --retries 5 \
-  --retry-delay 1 \
-  --request-interval 0 \
-  --max-tokens 768 \
-  > "$V92_LEGACY_RUN/nohup.log" 2>&1 &
-
-PID=$!
-printf '%s\n' "$PID" > "$V92_LEGACY_RUN/pid"
-printf 'V92_LEGACY_RUN=%s PID=%s\n' "$V92_LEGACY_RUN" "$PID"
-```
-
-验收时先看候选数分布、`legacy_candidates_added`和`obsolete_legacy_assignments_removed`，再比较纯Top30的明确错标、空标、扩召和可训练题数。
-
-如需查看果蝇眼色题为什么误选“人类红绿色盲症”，用诊断模式单独运行。诊断模式不改动主流程Prompt或输出，只对所有最终入选Label和指定重点Label输出长理由、对象边界、必要性、支持证据和反对证据。
-
-```bash
-V92_LEGACY_CANDIDATES_RUN="$(
-  cat runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
-)"
-FRUIT_FLY_DEBUG_RUN="runtime/$(date +%Y%m%d-%H%M%S)-fruit-fly-adjudication-debug"
-mkdir -p "$FRUIT_FLY_DEBUG_RUN"
-
-nohup env PYTHONPATH=src python scripts/debug_candidate_adjudication.py \
-  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
-  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
-  --labels configs/labels.jsonl \
-  --question-id '2327493552051331072' \
-  --focus-label-id '2276103483819315200' \
-  --focus-label-id '2276103479641788416' \
-  --run-dir "$FRUIT_FLY_DEBUG_RUN" \
-  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
-  --model 'DeepSeek-V4-Flash' \
-  --timeout 600 \
-  --retries 5 \
-  --retry-delay 1 \
-  --max-tokens 6000 \
-  > "$FRUIT_FLY_DEBUG_RUN/nohup.log" 2>&1 &
-
-PID=$!
-printf '%s\n' "$PID" > "$FRUIT_FLY_DEBUG_RUN/pid"
-printf '%s\n' "$FRUIT_FLY_DEBUG_RUN" \
-  > runtime/LATEST_FRUIT_FLY_ADJUDICATION_DEBUG_RUN
-printf 'FRUIT_FLY_DEBUG_RUN=%s PID=%s\n' "$FRUIT_FLY_DEBUG_RUN" "$PID"
-```
-
-运行完成后查看：
-
-```bash
-FRUIT_FLY_DEBUG_RUN="$(cat runtime/LATEST_FRUIT_FLY_ADJUDICATION_DEBUG_RUN)"
-python -m json.tool "$FRUIT_FLY_DEBUG_RUN/result.json"
-```
-
-### V10结构化硬门控
-
-V9.2中DS即使明确识别“Label限定人类，题目对象为果蝇”，仍可用“机制一致”自行覆盖否决条件。V10取消DS最终选择权：DS只输出`proposed + checks`，程序根据固定枚举和证据校验计算`selected_labels`。
-
-硬门槛包括：
-
-- `literal_relation == EXACT`；
-- GENERIC要求`object_match == NOT_APPLICABLE`；
-- RESTRICTED要求`object_match == EXACT`、非空`scope_anchors`和`object_evidence`；
-- `mechanism_relation == DIRECT`；
-- `dimension_match == true`；
-- `necessary == true`；
-- evidence必须是指定题目字段的连续原文；
-- RESTRICTED的scope anchor必须来自Label名称，且直接出现在object evidence中。
-
-先只跑果蝇回归题：
-
-```bash
-cd /local_data/zhangyonglin/Bio-Know-Tag
-
-AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
-V92_LEGACY_CANDIDATES_RUN="$(
-  cat runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
-)"
-V10_FRUIT_FLY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v10-fruit-fly-smoke"
-
-mkdir -p "$V10_FRUIT_FLY_RUN"
-printf '%s\n' "$V10_FRUIT_FLY_RUN" > runtime/LATEST_V10_FRUIT_FLY_RUN
-
-nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
-  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
-  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
-  --labels configs/labels.jsonl \
-  --question-id '2327493552051331072' \
-  --run-dir "$V10_FRUIT_FLY_RUN" \
-  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
-  --model 'DeepSeek-V4-Flash' \
-  --workers 1 \
-  --timeout 600 \
-  --retries 5 \
-  --retry-delay 1 \
-  --request-interval 0 \
-  --max-tokens 3000 \
-  > "$V10_FRUIT_FLY_RUN/nohup.log" 2>&1 &
-
-PID=$!
-printf '%s\n' "$PID" > "$V10_FRUIT_FLY_RUN/pid"
-printf 'V10_FRUIT_FLY_RUN=%s PID=%s\n' "$V10_FRUIT_FLY_RUN" "$PID"
-```
-
-完成后查看：
-
-```bash
-V10_FRUIT_FLY_RUN="$(cat runtime/LATEST_V10_FRUIT_FLY_RUN)"
-python -m json.tool "$V10_FRUIT_FLY_RUN/report.json"
-python -m json.tool "$V10_FRUIT_FLY_RUN/predictions.jsonl"
-```
-
-预期最终保留“伴性遗传的分类与应用”，并在`gate_rejected_labels`中记录“人类红绿色盲症”的`literal_relation`、`restricted_object_mismatch`或`mechanism_relation`否决。
-
-### V10.1任务目标一致性硬门槛
-
-V10果蝇单题已删除“人类红绿色盲症”，但DS又因为同样出现“隐雌×显雄”方法，误选“基因在染色体上位置的判定”。两者的最终任务不同：当前设问要根据眼色判断子代性别，Label则要根据杂交结果判断基因的染色体位置。
-
-V10.1在每个候选check中增加：
-
-- `question_target`：当前设问要求得出的最终结论；
-- `label_target`：根据Label名称、路径和定义确定的任务；
-- `target_relation`：`EXACT | PREREQUISITE_ONLY | DIFFERENT`。
-
-程序只保留`target_relation=EXACT`。先用同一果蝇题复测：
-
-```bash
-cd /local_data/zhangyonglin/Bio-Know-Tag
-
-AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
-V92_LEGACY_CANDIDATES_RUN="$(
-  cat runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
-)"
-V101_FRUIT_FLY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v101-fruit-fly-smoke"
-
-mkdir -p "$V101_FRUIT_FLY_RUN"
-printf '%s\n' "$V101_FRUIT_FLY_RUN" > runtime/LATEST_V101_FRUIT_FLY_RUN
-
-nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
-  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
-  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
-  --labels configs/labels.jsonl \
-  --question-id '2327493552051331072' \
-  --run-dir "$V101_FRUIT_FLY_RUN" \
-  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
-  --model 'DeepSeek-V4-Flash' \
-  --workers 1 \
-  --timeout 600 \
-  --retries 5 \
-  --retry-delay 1 \
-  --request-interval 0 \
-  --max-tokens 3500 \
-  > "$V101_FRUIT_FLY_RUN/nohup.log" 2>&1 &
-
-PID=$!
-printf '%s\n' "$PID" > "$V101_FRUIT_FLY_RUN/pid"
-printf 'V101_FRUIT_FLY_RUN=%s PID=%s\n' "$V101_FRUIT_FLY_RUN" "$PID"
-```
-
-完成后检查`predictions.jsonl`：“人类红绿色盲症”和“基因在染色体上位置的判定”均不应进入`selected_labels`。若DS未提名“伴性遗传的分类与应用”，允许最终空标并过滤，不用错标补齐。
-
-## 25. Top25 + 当前458内旧knw_ids精判消融
-
-目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。
-
-```bash
-cd /local_data/zhangyonglin/Bio-Know-Tag
-
-UNIT_RUN="$(cat runtime/LATEST_LABEL_UNITS_RUN)"
 AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
 LEGACY_AUG_RUN="runtime/$(date +%Y%m%d-%H%M%S)-audit-top25-plus-legacy"
 
@@ -1759,15 +1521,15 @@ python -m json.tool "$LEGACY_AUG_RUN/report.json"
 这里故意不传`--max-legacy-additions`：同一题所有仍属于当前458的旧ID都应进入候选，报告中的候选数因此可能大于25。
 
 ```bash
-V86_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v8-6-top25-plus-legacy"
-mkdir -p "$V86_LEGACY_RUN"
-printf '%s\n' "$V86_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V86_LEGACY_RUN
+V91_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v91-top25-plus-legacy"
+mkdir -p "$V91_LEGACY_RUN"
+printf '%s\n' "$V91_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V91_LEGACY_RUN
 
 nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
   --candidates "$LEGACY_AUG_RUN/candidates.jsonl" \
   --labels configs/labels.jsonl \
-  --run-dir "$V86_LEGACY_RUN" \
+  --run-dir "$V91_LEGACY_RUN" \
   --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
   --model 'DeepSeek-V4-Flash' \
   --workers 20 \
@@ -1776,14 +1538,14 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --retry-delay 1 \
   --request-interval 0 \
   --max-tokens 256 \
-  > "$V86_LEGACY_RUN/nohup.log" 2>&1 &
+  > "$V91_LEGACY_RUN/nohup.log" 2>&1 &
 
 PID=$!
-printf '%s\n' "$PID" > "$V86_LEGACY_RUN/pid"
-printf 'V86_LEGACY_RUN=%s PID=%s\n' "$V86_LEGACY_RUN" "$PID"
+printf '%s\n' "$PID" > "$V91_LEGACY_RUN/pid"
+printf 'V91_LEGACY_RUN=%s PID=%s\n' "$V91_LEGACY_RUN" "$PID"
 ```
 
-只比较以下变化：明确错标数、原Top25空标题是否被正确旧ID救回、是否因旧标签噪声新增错标、`usable_for_training`。这个实验不把旧ID当金标。
+验收时要求`prompt_version=candidate-adjudication-v9.1-scope-evidence`。重点比较明确错标数、原Top25空标题是否被正确旧ID救回、是否因旧标签噪声新增错标及`usable_for_training`。这个实验不把旧ID当金标。
 
 ## 26. 生物Label释义覆盖实验（每Label最多500题）
 
