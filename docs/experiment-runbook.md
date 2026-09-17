@@ -1705,16 +1705,19 @@ python -m json.tool "$COMBINED_RUN/report.json"
 
 负样本误收率初筛：不超过5%为稳定，5%至15%为轻微边界风险，15%至30%为疑似偏宽/重叠，超过30%为严重边界冲突。组合报告对少于300道正样本的Label始终保留`U_LONG_TAIL_REVIEW`，不会因比例自动修改释义。
 
-## 28. 已接受兄弟题的二次共标Judge
+## 28. 已接受兄弟题的匿名候选二次Judge
 
-第一阶段硬负样本只能测量“兄弟题接受率”，不能直接当作错标率。同父级Label可能存在上下位包含、综合—原子关系、比较Label与单端Label重叠，也可能是历史来源Label漏标。因此对第一阶段接受的5,555条再进行一次最小充分知识集裁决，结论仅允许：
+第一阶段硬负样本只能测量“兄弟题接受率”，不能直接当作错标率。同父级Label可能存在上下位包含、综合—原子关系、比较Label与单端Label重叠，也可能是历史来源Label漏标。因此对第一阶段接受的5,555条再进行一次最小充分知识集裁决。
+
+v1曾直接告诉DS“来源Label已高置信”，导致5,555条中88.53%被固定判为“目标Label边界过宽”，另两类决策为0，属于来源锚定导致的判定塌缩，不用于最终校正。v2将所有Label随机映射为`C01/C02/...`，不告知哪个是历史来源、哪个是待审目标，也不发送第一阶段分数。DS只输出最小充分候选code集合与`context_insufficient`，程序再映射为：
 
 - `合理共标`；
 - `目标Label边界过宽`；
 - `来源Label不足以描述该题`；
+- `两侧Label均不充分`；
 - `无法判断`。
 
-Prompt不向DS提供第一阶段分数，避免锚定。它明确禁止上位+下位机械双标，要求综合Label实际联动多个子模块，比较Label实际比较双方，实验Label必须考实验任务本身。
+Prompt明确禁止上位+下位机械双标，要求综合Label实际联动多个子模块，比较Label实际比较双方，实验Label必须考实验任务本身。候选顺序按任务哈希稳定随机化，全量5,555条中待审目标位于第1/第2位的数量近似均衡。
 
 ### 28.1 20条smoke
 
@@ -1745,7 +1748,7 @@ python -m json.tool "$COLABEL_SMOKE_RUN/report.json"
 head -n 5 "$COLABEL_SMOKE_RUN/results.jsonl"
 ```
 
-验收`input=processed=success=20`、`error=pending=0`，并检查四类决策字段可正常解析。
+验收`input=processed=success=20`、`error=pending=0`，检查`selected_candidates/context_insufficient`和程序派生的五类决策字段可正常解析。若结果又只出现1–2类且某类占比极端，不启动全量，先审核Prompt。
 
 ### 28.2 全量5,555条
 
@@ -1795,7 +1798,7 @@ printf '%s\n' "$CORRECTED_RUN" > runtime/LATEST_CORRECTED_BOUNDARY_RUN
 python -m json.tool "$CORRECTED_RUN/report.json"
 ```
 
-校正时，`reasonable_colabel`和`source_label_insufficient`从负样本分母中移除；只有`目标Label边界过宽`计为真正误收。若某Label移除伪负例后的有效负样本少于20，则进入`U_INSUFFICIENT_VALID_NEGATIVES`，不根据百分比自动修改释义。
+校正时，`合理共标`、`来源Label不足以描述该题`和`两侧Label均不充分`从负样本分母中移除；只有`目标Label边界过宽`计为真正误收，`无法判断`不强行纳入。若某Label移除伪负例后的有效负样本少于20，则进入`U_INSUFFICIENT_VALID_NEGATIVES`，不根据百分比自动修改释义。
 
 ## 29. 按Label导出正样本题目与DS判定
 

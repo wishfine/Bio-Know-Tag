@@ -7,6 +7,7 @@ from bio_know_tag.co_label_judge import (
     DECISIONS,
     build_batch_prompt,
     build_batches,
+    build_candidate_map,
     build_judge_tasks,
     combine_corrected_boundary_assessments,
     normalize_batch_response,
@@ -56,31 +57,81 @@ def test_build_judge_tasks_only_keeps_first_stage_acceptances():
     assert tasks[0]["first_stage_score"] == 0.95
 
 
-def test_prompt_defines_minimal_sufficient_colabel_decisions():
-    labels = {"S": _label("S", "源Label"), "T": _label("T", "目标Label")}
+def test_prompt_anonymizes_roles_and_requests_minimal_candidate_subset():
+    labels = {"S": _label("S", "标签甲"), "T": _label("T", "标签乙")}
     prompt = build_batch_prompt([_sample()], labels)
 
     assert "最小充分知识点集合" in prompt
-    assert "上位Label不得仅因包含当前知识就共标" in prompt
+    assert "上位Label不得仅因包含当前知识就选中" in prompt
     assert "综合Label必须真正要求多个子模块联动" in prompt
-    assert all(decision in prompt for decision in DECISIONS)
+    assert '"selected_candidates"' in prompt
+    assert '"code": "C01"' in prompt
+    assert '"code": "C02"' in prompt
+    assert "高置信来源Label" not in prompt
+    assert "第一阶段" not in prompt
+    assert "目标Label：" not in prompt
     assert "first_stage_score" not in prompt
 
 
-def test_normalize_rejects_unknown_decision():
-    with pytest.raises(ValueError, match="unknown decision"):
+def test_candidate_map_is_stable_and_hides_target_position():
+    first = build_candidate_map(_sample(1))
+    second = build_candidate_map(_sample(1))
+
+    assert first == second
+    assert set(first.values()) == {"S", "T"}
+    assert set(first) == {"C01", "C02"}
+
+
+def test_normalize_rejects_unknown_candidate_code():
+    with pytest.raises(ValueError, match="unknown selected candidate"):
         normalize_batch_response(
             {
                 "results": [
                     {
                         "task_id": "q1::T",
                         "question_id": "q1",
-                        "decision": "可能合理",
+                        "selected_candidates": ["C99"],
+                        "context_insufficient": False,
                     }
                 ]
             },
             [_sample()],
         )
+
+
+@pytest.mark.parametrize(
+    ("selected_ids", "context_insufficient", "expected"),
+    [
+        ({"S", "T"}, False, "合理共标"),
+        ({"S"}, False, "目标Label边界过宽"),
+        ({"T"}, False, "来源Label不足以描述该题"),
+        (set(), False, "两侧Label均不充分"),
+        (set(), True, "无法判断"),
+    ],
+)
+def test_normalize_derives_decision_from_anonymous_subset(
+    selected_ids: set[str], context_insufficient: bool, expected: str
+):
+    task = _sample()
+    candidate_map = build_candidate_map(task)
+    selected_codes = [
+        code for code, label_id in candidate_map.items() if label_id in selected_ids
+    ]
+    rows = normalize_batch_response(
+        {
+            "results": [
+                {
+                    "task_id": "q1::T",
+                    "question_id": "q1",
+                    "selected_candidates": selected_codes,
+                    "context_insufficient": context_insufficient,
+                }
+            ]
+        },
+        [task],
+    )
+
+    assert rows[0]["decision"] == expected
 
 
 def test_build_batches_respects_complete_prompt_budget():
@@ -145,7 +196,8 @@ def test_run_is_resumable_and_adaptively_splits_http_400(tmp_path: Path):
                         {
                             "task_id": f"{question_id}::T",
                             "question_id": question_id,
-                            "decision": "合理共标",
+                            "selected_candidates": ["C01", "C02"],
+                            "context_insufficient": False,
                         }
                     ]
                 },
@@ -237,6 +289,7 @@ def test_corrected_boundary_rate_removes_invalid_sibling_negatives(tmp_path: Pat
                     "合理共标": 14,
                     "目标Label边界过宽": 3,
                     "来源Label不足以描述该题": 1,
+                    "两侧Label均不充分": 0,
                     "无法判断": 2,
                 },
             },

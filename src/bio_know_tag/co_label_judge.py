@@ -14,11 +14,12 @@ from typing import Any, Iterable
 from bio_know_tag.ds import DSRequestError, parse_json_content
 
 
-PROMPT_VERSION = "co-label-adjudication-v1-minimal-sufficient"
+PROMPT_VERSION = "co-label-adjudication-v2-anonymous-minimal-subset"
 DECISIONS = (
     "合理共标",
     "目标Label边界过宽",
     "来源Label不足以描述该题",
+    "两侧Label均不充分",
     "无法判断",
 )
 
@@ -68,19 +69,38 @@ def build_judge_tasks(
                 "first_stage_score": float(result["relevance_score"]),
             }
         )
-    tasks.sort(key=lambda row: (str(row["label_id"]), str(row["question_id"])))
+    tasks.sort(
+        key=lambda row: hashlib.sha256(str(row["pair_id"]).encode()).hexdigest()
+    )
     return tasks
 
 
 def _label_card(label: dict[str, Any]) -> dict[str, Any]:
     return {
-        "label_id": str(label.get("label_id") or ""),
         "label_name": label.get("label_name", ""),
         "definition": label.get("definition", ""),
         "core_concepts": label.get("core_concepts", ""),
         "common_assessments": label.get("common_assessments", ""),
         "distinctions": label.get("distinctions", ""),
     }
+
+
+def build_candidate_map(task: dict[str, Any]) -> dict[str, str]:
+    """Build stable anonymous candidate codes without exposing source/target roles."""
+    task_id = str(task["pair_id"])
+    label_ids = {
+        str(task["label_id"]),
+        *(str(value) for value in task.get("source_label_ids") or []),
+    }
+    if len(label_ids) < 2:
+        raise ValueError("co-label task must contain at least two distinct candidates")
+    ordered = sorted(
+        label_ids,
+        key=lambda label_id: hashlib.sha256(
+            f"{task_id}:{label_id}".encode()
+        ).hexdigest(),
+    )
+    return {f"C{index:02d}": label_id for index, label_id in enumerate(ordered, 1)}
 
 
 def _question_context(task: dict[str, Any]) -> dict[str, Any]:
@@ -99,55 +119,43 @@ def build_batch_prompt(
 ) -> str:
     if not tasks:
         raise ValueError("batch must not be empty")
-    target_ids = {str(task["label_id"]) for task in tasks}
-    if len(target_ids) != 1:
-        raise ValueError("one batch must contain exactly one target Label")
-    target_id = next(iter(target_ids))
-    if target_id not in labels:
-        raise ValueError(f"unknown target label: {target_id}")
     questions = []
     for task in tasks:
-        source_ids = [str(value) for value in task.get("source_label_ids") or []]
-        if not source_ids or any(source_id not in labels for source_id in source_ids):
-            raise ValueError("unknown or empty source labels")
+        candidate_map = build_candidate_map(task)
+        if any(label_id not in labels for label_id in candidate_map.values()):
+            raise ValueError("unknown candidate label")
         questions.append(
             {
                 "task_id": str(task["pair_id"]),
                 "question_id": str(task["question_id"]),
-                "source_labels": [_label_card(labels[source_id]) for source_id in source_ids],
+                "candidates": [
+                    {"code": code, **_label_card(labels[label_id])}
+                    for code, label_id in candidate_map.items()
+                ],
                 "question": _question_context(task),
             }
         )
-    decisions = " | ".join(DECISIONS)
     return f"""你是高中生物知识点最终标注审核专家。
 
-任务：题目已有一个或多个高置信来源Label；第一阶段又认为目标Label与题目匹配。现在请根据“最小充分知识点集合”，判断来源Label和目标Label是否应同时成为该题的最终标签。
+任务：对每道题独立审核所有匿名候选Label，输出正确作答必须使用的“最小充分知识点集合”。候选顺序是随机的，不代表优先级。
 
 判定原则：
 1. 只看正确完成当前设问必须调用的知识；材料背景、工具、错误选项和弱相关内容不打标。
-2. 上位Label不得仅因包含当前知识就共标；上位+下位机械重复时，优先最小、直接的Label。
+2. 上位Label不得仅因包含当前知识就选中；上位+下位机械重复时，优先最小、直接的Label。
 3. 综合Label必须真正要求多个子模块联动；只考一个子模块不共标综合Label。
 4. 比较/区别与联系Label必须真正要求比较或联系双方；只考一端不命中。
 5. 实验Label只在实验目的、步骤、变量、现象、误差或方案评价是作答对象时命中。
-6. 不要因为目标Label更宽泛、“也能解释”或与来源Label相邻就判为合理共标。
-7. 不参考历史未打目标Label这一事实；仅根据题目和Label释义判断。
-
-四类结论：
-- 合理共标：来源Label与目标Label分别描述题目中不可替代的主要考点，两者都应保留。
-- 目标Label边界过宽：来源Label已足以描述作答所需知识；目标Label只是上位包含、背景、弱相关，或未满足综合/比较条件。
-- 来源Label不足以描述该题：目标Label才是主要或必要考点，来源Label组合本身不完整或口径不准。
-- 无法判断：图片/关键上下文缺失，或现有释义不足以唯一判定。
+6. 每个候选都必须独立评估；不得假定某个候选事先正确，也不得因为某Label更宽泛或“也能解释”就选中。
+7. 候选可选一个、多个或一个都不选。只有图片/关键上下文缺失到无法判定时，才设`context_insufficient=true`，此时`selected_candidates`必须为空列表。
 
 硬性输出：
 - 只输出严格JSON，不要Markdown、理由或额外文本。
 - results数量必须等于{len(tasks)}，且顺序与输入一致。
-- decision只能是：{decisions}
+- `selected_candidates`只能包含当题提供的候选code，不得输出Label名或ID。
+- `context_insufficient`必须是JSON布尔值。
 
 输出格式：
-{{"results":[{{"task_id":"","question_id":"","decision":"合理共标"}}]}}
-
-目标Label：
-{json.dumps(_label_card(labels[target_id]), ensure_ascii=False, indent=2)}
+{{"results":[{{"task_id":"","question_id":"","selected_candidates":["C01"],"context_insufficient":false}}]}}
 
 待审核题目：
 {json.dumps(questions, ensure_ascii=False, indent=2)}
@@ -168,15 +176,46 @@ def normalize_batch_response(
         question_id = str(result.get("question_id") or "")
         if task_id != str(task["pair_id"]) or question_id != str(task["question_id"]):
             raise ValueError("task_id/question_id mismatch")
-        decision = str(result.get("decision") or "")
-        if decision not in DECISIONS:
-            raise ValueError(f"unknown decision: {decision}")
+        selected = result.get("selected_candidates")
+        if not isinstance(selected, list) or any(
+            not isinstance(code, str) for code in selected
+        ):
+            raise ValueError("selected_candidates must be a list of strings")
+        if len(selected) != len(set(selected)):
+            raise ValueError("selected_candidates contains duplicates")
+        context_insufficient = result.get("context_insufficient")
+        if not isinstance(context_insufficient, bool):
+            raise ValueError("context_insufficient must be boolean")
+        candidate_map = build_candidate_map(task)
+        unknown = [code for code in selected if code not in candidate_map]
+        if unknown:
+            raise ValueError(f"unknown selected candidate: {unknown[0]}")
+        if context_insufficient and selected:
+            raise ValueError("context-insufficient result must select no candidates")
+        selected_label_ids = [candidate_map[code] for code in selected]
+        target_selected = str(task["label_id"]) in selected_label_ids
+        source_ids = {str(value) for value in task.get("source_label_ids") or []}
+        source_selected = any(label_id in source_ids for label_id in selected_label_ids)
+        if context_insufficient:
+            decision = "无法判断"
+        elif target_selected and source_selected:
+            decision = "合理共标"
+        elif not target_selected and source_selected:
+            decision = "目标Label边界过宽"
+        elif target_selected and not source_selected:
+            decision = "来源Label不足以描述该题"
+        else:
+            decision = "两侧Label均不充分"
         normalized.append(
             {
                 "task_id": task_id,
                 "question_id": question_id,
                 "target_label_id": str(task["label_id"]),
                 "source_label_ids": [str(value) for value in task["source_label_ids"]],
+                "candidate_code_map": candidate_map,
+                "selected_candidates": selected,
+                "selected_label_ids": selected_label_ids,
+                "context_insufficient": context_insufficient,
                 "decision": decision,
             }
         )
@@ -192,33 +231,25 @@ def build_batches(
 ) -> list[list[dict[str, Any]]]:
     if max_batch_size < 1 or char_budget < 1:
         raise ValueError("batch limits must be positive")
-    by_target: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    order = []
-    for task in tasks:
-        target = str(task["label_id"])
-        if target not in by_target:
-            order.append(target)
-        by_target[target].append(task)
     batches = []
-    for target in order:
-        current = []
-        current_chars = 0
-        for task in by_target[target]:
-            task_chars = len(json.dumps(task, ensure_ascii=False, separators=(",", ":")))
-            candidate = [*current, task]
-            exceeds_budget = (
-                len(build_batch_prompt(candidate, labels)) > char_budget
-                if labels is not None
-                else current_chars + task_chars > char_budget
-            )
-            if current and (len(current) >= max_batch_size or exceeds_budget):
-                batches.append(current)
-                current = []
-                current_chars = 0
-            current.append(task)
-            current_chars += task_chars
-        if current:
+    current = []
+    current_chars = 0
+    for task in tasks:
+        task_chars = len(json.dumps(task, ensure_ascii=False, separators=(",", ":")))
+        candidate = [*current, task]
+        exceeds_budget = (
+            len(build_batch_prompt(candidate, labels)) > char_budget
+            if labels is not None
+            else current_chars + task_chars > char_budget
+        )
+        if current and (len(current) >= max_batch_size or exceeds_budget):
             batches.append(current)
+            current = []
+            current_chars = 0
+        current.append(task)
+        current_chars += task_chars
+    if current:
+        batches.append(current)
     return batches
 
 
@@ -383,7 +414,7 @@ def run_co_label_judge(
             )
             return normalized, {
                 "prompt_version": PROMPT_VERSION,
-                "target_label_id": str(batch[0]["label_id"]),
+                "target_label_ids": sorted({str(task["label_id"]) for task in batch}),
                 "task_ids": [str(task["pair_id"]) for task in batch],
                 "batch_size": len(batch),
                 "prompt_chars": len(prompt),
@@ -400,7 +431,7 @@ def run_co_label_judge(
         except DSRequestError as exc:
             return [], {
                 "prompt_version": PROMPT_VERSION,
-                "target_label_id": str(batch[0]["label_id"]),
+                "target_label_ids": sorted({str(task["label_id"]) for task in batch}),
                 "task_ids": [str(task["pair_id"]) for task in batch],
                 "batch_size": len(batch),
                 "prompt_chars": len(prompt),
@@ -418,7 +449,7 @@ def run_co_label_judge(
             response = locals().get("response")
             return [], {
                 "prompt_version": PROMPT_VERSION,
-                "target_label_id": str(batch[0]["label_id"]),
+                "target_label_ids": sorted({str(task["label_id"]) for task in batch}),
                 "task_ids": [str(task["pair_id"]) for task in batch],
                 "batch_size": len(batch),
                 "prompt_chars": len(prompt),
@@ -554,10 +585,11 @@ def combine_corrected_boundary_assessments(
             )
         reasonable = decision_counts["合理共标"]
         source_insufficient = decision_counts["来源Label不足以描述该题"]
+        neither_sufficient = decision_counts["两侧Label均不充分"]
         true_errors = decision_counts["目标Label边界过宽"]
         unresolved = decision_counts["无法判断"]
         first_rejected = hard_total - first_accepted
-        invalid_negatives = reasonable + source_insufficient
+        invalid_negatives = reasonable + source_insufficient + neither_sufficient
         valid_negative_count = first_rejected + true_errors
         corrected_rate = (
             round(true_errors / valid_negative_count, 6)
