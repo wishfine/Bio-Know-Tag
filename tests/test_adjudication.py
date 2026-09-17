@@ -61,6 +61,9 @@ def _generic_check(*, source: str = "stem", quote: str = "题干") -> dict:
         "object_match": "NOT_APPLICABLE",
         "object_evidence": None,
         "mechanism_relation": "DIRECT",
+        "question_target": "得出当前设问要求的结论",
+        "label_target": "得出当前Label对应的结论",
+        "target_relation": "EXACT",
         "dimension_match": True,
         "necessary": True,
         "evidence": {"source": source, "quote": quote},
@@ -155,13 +158,13 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v10_prompt_delegates_final_selection_to_structured_hard_gates():
+def test_v101_prompt_adds_target_alignment_to_structured_hard_gates():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v10-structured-hard-gates"
+    assert PROMPT_VERSION == "candidate-adjudication-v10.1-target-aligned-hard-gates"
     assert "错标的代价远高于漏标" in prompt
     assert "七道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -194,6 +197,11 @@ def test_v10_prompt_delegates_final_selection_to_structured_hard_gates():
     assert '"literal_relation": "EXACT"' in prompt
     assert '"scope_kind": "RESTRICTED"' in prompt
     assert '"mechanism_relation": "DIRECT"' in prompt
+    assert '"question_target"' in prompt
+    assert '"label_target"' in prompt
+    assert '"target_relation": "EXACT"' in prompt
+    assert "任务目标一致性（独立硬门槛）" in prompt
+    assert "研究对象、判断动作和最终结论都一致" in prompt
     assert "你不拥有最终选择权" in prompt
     assert "不输出selected或KEEP/REJECT" in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
@@ -341,6 +349,9 @@ def test_validate_v10_hard_rejects_analogy_and_object_mismatch():
         "object_match": "MISMATCH",
         "object_evidence": {"source": "analysis", "quote": "果蝇白眼"},
         "mechanism_relation": "SHARED_ONLY",
+        "question_target": "根据果蝇眼色判断子代性别",
+        "label_target": "判断人类红绿色盲的遗传",
+        "target_relation": "DIFFERENT",
         "dimension_match": True,
         "necessary": False,
         "evidence": {"source": "analysis", "quote": "果蝇白眼"},
@@ -353,8 +364,29 @@ def test_validate_v10_hard_rejects_analogy_and_object_mismatch():
         "literal_relation",
         "restricted_object_mismatch",
         "mechanism_relation",
+        "target_relation",
         "necessary",
     ]
+
+
+def test_validate_v101_rejects_same_method_with_different_question_target():
+    value = _model_value(["C01"])
+    value["checks"]["C01"].update(
+        {
+            "question_target": "根据子代眼色判断果蝇性别",
+            "label_target": "根据杂交结果判断基因所在染色体位置",
+            "target_relation": "DIFFERENT",
+        }
+    )
+
+    result = validate_adjudication_result(value, {"C01"})
+
+    assert result["selected"] == []
+    assert result["gate_rejected_codes"] == {"C01": ["target_relation"]}
+    assert result["checks"]["C01"]["question_target"] == "根据子代眼色判断果蝇性别"
+    assert result["checks"]["C01"]["label_target"] == (
+        "根据杂交结果判断基因所在染色体位置"
+    )
 
 
 def test_validate_adjudication_derives_empty_state():

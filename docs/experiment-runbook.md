@@ -1685,6 +1685,53 @@ python -m json.tool "$V10_FRUIT_FLY_RUN/predictions.jsonl"
 
 预期最终保留“伴性遗传的分类与应用”，并在`gate_rejected_labels`中记录“人类红绿色盲症”的`literal_relation`、`restricted_object_mismatch`或`mechanism_relation`否决。
 
+### V10.1任务目标一致性硬门槛
+
+V10果蝇单题已删除“人类红绿色盲症”，但DS又因为同样出现“隐雌×显雄”方法，误选“基因在染色体上位置的判定”。两者的最终任务不同：当前设问要根据眼色判断子代性别，Label则要根据杂交结果判断基因的染色体位置。
+
+V10.1在每个候选check中增加：
+
+- `question_target`：当前设问要求得出的最终结论；
+- `label_target`：根据Label名称、路径和定义确定的任务；
+- `target_relation`：`EXACT | PREREQUISITE_ONLY | DIFFERENT`。
+
+程序只保留`target_relation=EXACT`。先用同一果蝇题复测：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V92_LEGACY_CANDIDATES_RUN="$(
+  cat runtime/LATEST_V92_TOP25_PLUS_LEGACY_CANDIDATES_RUN
+)"
+V101_FRUIT_FLY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-v101-fruit-fly-smoke"
+
+mkdir -p "$V101_FRUIT_FLY_RUN"
+printf '%s\n' "$V101_FRUIT_FLY_RUN" > runtime/LATEST_V101_FRUIT_FLY_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V92_LEGACY_CANDIDATES_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --question-id '2327493552051331072' \
+  --run-dir "$V101_FRUIT_FLY_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 1 \
+  --timeout 600 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 3500 \
+  > "$V101_FRUIT_FLY_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V101_FRUIT_FLY_RUN/pid"
+printf 'V101_FRUIT_FLY_RUN=%s PID=%s\n' "$V101_FRUIT_FLY_RUN" "$PID"
+```
+
+完成后检查`predictions.jsonl`：“人类红绿色盲症”和“基因在染色体上位置的判定”均不应进入`selected_labels`。若DS未提名“伴性遗传的分类与应用”，允许最终空标并过滤，不用错标补齐。
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。

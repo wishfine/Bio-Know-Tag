@@ -18,7 +18,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v10-structured-hard-gates"
+PROMPT_VERSION = "candidate-adjudication-v10.1-target-aligned-hard-gates"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 EVIDENCE_SOURCES = ("parent_stem", "stem", "options", "answer_text", "analysis")
 
@@ -125,6 +125,9 @@ def build_adjudication_prompt(
 - object_match只能是EXACT、NOT_APPLICABLE、MISMATCH。
 - RESTRICTED必须提供object_evidence；quote中必须直接出现scope_anchors中的对象限定，不能用相同机制代替。
 - mechanism_relation只能是DIRECT、SHARED_ONLY、BACKGROUND。
+- question_target用一个短句写当前设问要求学生最终判断、计算、解释或产出什么。
+- label_target用一个短句写该Label本身要解决的任务，不得按当前题目改写Label目标。
+- target_relation只能是EXACT、PREREQUISITE_ONLY、DIFFERENT。只有两者要求得出同一类最终结论才是EXACT；只是前置知识、方法相似或最终判断对象不同时，必须是PREREQUISITE_ONLY或DIFFERENT。
 - dimension_match和necessary只能是布尔值。
 - evidence是支持当前Label考点的原文。
 
@@ -141,6 +144,9 @@ evidence和object_evidence的source只能是parent_stem、stem、options、answe
       "object_match": "NOT_APPLICABLE",
       "object_evidence": null,
       "mechanism_relation": "DIRECT",
+      "question_target": "当前设问要求得出的最终结论",
+      "label_target": "Label要解决的任务",
+      "target_relation": "EXACT",
       "dimension_match": true,
       "necessary": true,
       "evidence": {"source": "stem", "quote": "题目连续原文"}
@@ -152,6 +158,9 @@ evidence和object_evidence的source只能是parent_stem、stem、options、answe
       "object_match": "EXACT",
       "object_evidence": {"source": "analysis", "quote": "含具体对象的连续原文"},
       "mechanism_relation": "DIRECT",
+      "question_target": "当前设问要求得出的最终结论",
+      "label_target": "Label要解决的任务",
+      "target_relation": "EXACT",
       "dimension_match": true,
       "necessary": true,
       "evidence": {"source": "analysis", "quote": "解析连续原文"}
@@ -221,6 +230,13 @@ C. 对暂定的proposed做一次反证复核：主动寻找“为什么它不该
 5. 生命层级与作用通道：必须保持题目实际考查的对象、动作、生命层级、结构和作用通道一致。不得改写或补写题目中没有的对象、实验、结构、过程或作用通道。题目明确考查跨层级因果关系时才允许合理多标。
 6. 边界否决：distinctions是硬否决条件；只要题目落在它排除的一侧，立即拒绝。实验/方法Label还必须真正考实验目的、步骤、变量、现象、误差或方案评价，不得由同模块概念触发。
 7. 必要性反问：如果学生完全不会该Label，仍能依靠其他知识完整解决当前设问，则该Label不是必要考点，拒绝。
+
+任务目标一致性（独立硬门槛）：
+- 先写question_target：当前设问最终要求学生得出什么。
+- 再仅根据label_name、label_path和definition写label_target：该Label要解决什么。
+- 两者的研究对象、判断动作和最终结论都一致时，target_relation才是EXACT。
+- 同样使用杂交、计数、实验或计算方法，但最终要判断的事物不同，必须是DIFFERENT。
+- Label只是完成当前任务的背景或前置知识，必须是PREREQUISITE_ONLY。
 
 Label名称字面成立测试（选择前必做）：
 - 把完整label_name代入“本题直接考查【label_name】”。
@@ -330,6 +346,7 @@ def validate_adjudication_result(
         scope_kind = check.get("scope_kind")
         object_match = check.get("object_match")
         mechanism_relation = check.get("mechanism_relation")
+        target_relation = check.get("target_relation")
         if literal_relation not in {"EXACT", "ANALOGY_ONLY", "FALSE"}:
             raise ValueError(f"invalid literal_relation for {code}")
         if scope_kind not in {"GENERIC", "RESTRICTED"}:
@@ -338,6 +355,18 @@ def validate_adjudication_result(
             raise ValueError(f"invalid object_match for {code}")
         if mechanism_relation not in {"DIRECT", "SHARED_ONLY", "BACKGROUND"}:
             raise ValueError(f"invalid mechanism_relation for {code}")
+        if target_relation not in {"EXACT", "PREREQUISITE_ONLY", "DIFFERENT"}:
+            raise ValueError(f"invalid target_relation for {code}")
+        question_target = check.get("question_target")
+        label_target = check.get("label_target")
+        for field, text in (
+            ("question_target", question_target),
+            ("label_target", label_target),
+        ):
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"{field} must be a non-empty string for {code}")
+            if len(text.strip()) > 300:
+                raise ValueError(f"{field} is too long for {code}")
         if not isinstance(check.get("dimension_match"), bool):
             raise ValueError(f"dimension_match must be boolean for {code}")
         if not isinstance(check.get("necessary"), bool):
@@ -364,6 +393,9 @@ def validate_adjudication_result(
             "object_match": object_match,
             "object_evidence": object_evidence,
             "mechanism_relation": mechanism_relation,
+            "question_target": question_target.strip(),
+            "label_target": label_target.strip(),
+            "target_relation": target_relation,
             "dimension_match": check["dimension_match"],
             "necessary": check["necessary"],
             "evidence": evidence,
@@ -389,6 +421,8 @@ def validate_adjudication_result(
                 failures.append("restricted_object_evidence")
         if mechanism_relation != "DIRECT":
             failures.append("mechanism_relation")
+        if target_relation != "EXACT":
+            failures.append("target_relation")
         if not check["dimension_match"]:
             failures.append("dimension_match")
         if not check["necessary"]:
@@ -798,6 +832,9 @@ def run_adjudication(
                         "scope_anchors": check["scope_anchors"],
                         "literal_relation": check["literal_relation"],
                         "mechanism_relation": check["mechanism_relation"],
+                        "question_target": check["question_target"],
+                        "label_target": check["label_target"],
+                        "target_relation": check["target_relation"],
                         "dimension_match": check["dimension_match"],
                         "necessary": check["necessary"],
                         "object_evidence": object_evidence,
