@@ -1490,9 +1490,21 @@ printf 'V91_RUN=%s PID=%s\n' "$V91_RUN" "$PID"
 
 验收时要求`prompt_version=candidate-adjudication-v9.1-scope-evidence`，并重点复核4道硬错题。同时检查每个`selected_labels[]`都已物化`evidence`，不将缺少原文证据的输出直接用于训练。
 
-## 25. V9.1 + Top25 + 当前458内旧knw_ids
+### V9.1b精简硬边界Prompt
 
-主线固定使用V9.1 Prompt。候选为原混合召回Top25，再追加每题历史`knw_ids`中仍属于当前458的ID。旧ID不直接作为答案，仍交给DS精判；释义表外的旧ID删除，与Top25重复的ID去重。
+V9.1b保持V9.1的输入字段、候选排列、输出JSON和程序解析完全不变，只调整Prompt。它将长规则压缩为“Label界定→硬否决→还原当前任务→正向选中→特殊Label→Evidence/反证→状态”七层，新增：
+
+- 具体对象A只能上溯到通用机制Label，不能横向迁移到具体对象B；
+- 题目使用已知结论做其他推断，不等于考查该判定方法或发现实验；
+- `parent_stem`只能在小题有明确指代时补对象，不能单独制造考点；
+- 错误选项必须构成实质性考查，不能由孤立干扰信息触发Label；
+- 实验/判定类Label和综合Label设置额外准入条件。
+
+Prompt中不写入果蝇、色盲或其他已知审计题的具体答案，避免污染同一300题评估。验收版本为`candidate-adjudication-v9.1b-compact-hard-boundaries`。
+
+## 25. V9.1b + Top25 + 当前458内旧knw_ids
+
+当前实验使用V9.1b Prompt。候选为原混合召回Top25，再追加每题历史`knw_ids`中仍属于当前458的ID。旧ID不直接作为答案，仍交给DS精判；释义表外的旧ID删除，与Top25重复的ID去重。
 
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
@@ -1521,15 +1533,15 @@ python -m json.tool "$LEGACY_AUG_RUN/report.json"
 这里故意不传`--max-legacy-additions`：同一题所有仍属于当前458的旧ID都应进入候选，报告中的候选数因此可能大于25。
 
 ```bash
-V91_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v91-top25-plus-legacy"
-mkdir -p "$V91_LEGACY_RUN"
-printf '%s\n' "$V91_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V91_LEGACY_RUN
+V91B_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v91b-top25-plus-legacy"
+mkdir -p "$V91B_LEGACY_RUN"
+printf '%s\n' "$V91B_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V91B_LEGACY_RUN
 
 nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
   --candidates "$LEGACY_AUG_RUN/candidates.jsonl" \
   --labels configs/labels.jsonl \
-  --run-dir "$V91_LEGACY_RUN" \
+  --run-dir "$V91B_LEGACY_RUN" \
   --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
   --model 'DeepSeek-V4-Flash' \
   --workers 20 \
@@ -1538,14 +1550,14 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --retry-delay 1 \
   --request-interval 0 \
   --max-tokens 256 \
-  > "$V91_LEGACY_RUN/nohup.log" 2>&1 &
+  > "$V91B_LEGACY_RUN/nohup.log" 2>&1 &
 
 PID=$!
-printf '%s\n' "$PID" > "$V91_LEGACY_RUN/pid"
-printf 'V91_LEGACY_RUN=%s PID=%s\n' "$V91_LEGACY_RUN" "$PID"
+printf '%s\n' "$PID" > "$V91B_LEGACY_RUN/pid"
+printf 'V91B_LEGACY_RUN=%s PID=%s\n' "$V91B_LEGACY_RUN" "$PID"
 ```
 
-验收时要求`prompt_version=candidate-adjudication-v9.1-scope-evidence`。重点比较明确错标数、原Top25空标题是否被正确旧ID救回、是否因旧标签噪声新增错标及`usable_for_training`。这个实验不把旧ID当金标。
+验收时要求`prompt_version=candidate-adjudication-v9.1b-compact-hard-boundaries`。重点比较明确错标数、原Top25空标题是否被正确旧ID救回、是否因旧标签噪声新增错标及`usable_for_training`。这个实验不把旧ID当金标。
 
 ## 26. 生物Label释义覆盖实验（每Label最多500题）
 

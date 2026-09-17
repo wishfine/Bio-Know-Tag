@@ -68,8 +68,8 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert "知识点@模块@标签一" in prompt
     assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
-    assert "合理多标可以保留" in prompt
-    assert "可以少选、置空或扩召" in prompt
+    assert "多Label时" in prompt
+    assert "可以少选、selected=[]或要求扩召" in prompt
     assert "删除测试" not in prompt
     assert '"parent_context_missing": false' in prompt
     assert '"image_context_missing": false' in prompt
@@ -121,35 +121,33 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v91_prompt_requires_scope_first_verbatim_evidence_and_puts_reason_last():
+def test_v91b_prompt_is_compact_and_enforces_hard_boundaries():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v9.1-scope-evidence"
+    assert PROMPT_VERSION == "candidate-adjudication-v9.1b-compact-hard-boundaries"
     assert "错标的代价远高于漏标" in prompt
-    assert "七道硬门槛" in prompt
+    assert "硬否决：任意一项成立就拒绝，后续不得翻回" in prompt
     assert "反证复核" in prompt
-    assert "只要任意一道不能确定通过" in prompt
-    assert "不得因为研究对象、题干关键词或所属章节相同" in prompt
-    assert "对象与限定词" in prompt
-    assert "生命层级与作用通道" in prompt
-    assert "不得因底层机制相同而迁移具体Label" in prompt
-    assert "当前题目、答案或解析必须出现相同对象" in prompt
-    assert "名称和定义本身是通用原理、规律或机制" in prompt
-    assert "题目明确考查跨层级因果关系时才允许合理多标" in prompt
-    assert "对象不同即拒绝" not in prompt
+    assert "具体对象A横向迁移到具体对象B" in prompt
+    assert "题目只是使用已知结论完成推断" in prompt
+    assert "生命层级、结构或作用通道不一致" in prompt
+    assert "parent_stem只能在当前小题存在" in prompt
+    assert "具体对象A只能上溯到通用机制Label" in prompt
+    assert "实验、方法、观察、调查、测定、制作、构建、判定类Label" in prompt
+    assert "综合Label" in prompt
+    assert "多个彼此独立的子知识，不等于考查综合Label" in prompt
     assert "施肥过多" not in prompt
+    assert "果蝇白眼" not in prompt
+    assert "人类红绿色盲" not in prompt
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
     assert "rejected_risky" not in prompt
-    assert "Label允许覆盖的范围" in prompt
-    assert "core_concepts只能解释已由上述字段确定的范围" in prompt
-    assert "特定疾病、物种、实验、材料、组织或应用场景" in prompt
-    assert "不得改写或补写题目中没有的对象" in prompt
-    assert "evidence必须是当前题干、选项、答案或解析中的简短原文" in prompt
-    assert "reason用1至2句话、不超过120字" in prompt
+    assert "core_concepts只用于解释该范围内的概念和机制" in prompt
+    assert "evidence必须支持该Label的直接考查" in prompt
+    assert "1至2句话、不超过120字" in prompt
     assert '"reason": "当前设问直接考查……"' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
