@@ -1342,7 +1342,40 @@ V9不写入这4道题或具体答案，只把共性提炼为两道新硬门槛�
 
 训练物化增加硬过滤：`stem`与`parent_stem`同时为空的题即使DS选出Label，也设`text_content_missing=true`、`usable_for_training=false`，并计入`missing_question_text`。
 
-先在原300题上重建Top30，不变题目、Label表、Dense模型和DS：
+为避免同时改Prompt和候选数量，按三组顺序比较：已有`V8.6 + Top25`作为基线；先跑`V9 + 原Top25`只测Prompt/硬过滤；再跑`V9 + Top30`只测扩大候选的增量。
+
+先使用原Top25跑V9：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V9_TOP25_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v9-top25"
+mkdir -p "$V9_TOP25_RUN"
+printf '%s\n' "$V9_TOP25_RUN" > runtime/LATEST_ADJUDICATION_V9_TOP25_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$AUDIT_SAMPLE_RUN/audit_candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V9_TOP25_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 256 \
+  > "$V9_TOP25_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V9_TOP25_RUN/pid"
+printf 'V9_TOP25_RUN=%s PID=%s\n' "$V9_TOP25_RUN" "$PID"
+```
+
+然后在同一原300题上重建Top30，不变题目、Label表、Dense模型和DS：
 
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
