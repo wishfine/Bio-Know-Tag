@@ -1796,3 +1796,27 @@ python -m json.tool "$CORRECTED_RUN/report.json"
 ```
 
 校正时，`reasonable_colabel`和`source_label_insufficient`从负样本分母中移除；只有`目标Label边界过宽`计为真正误收。若某Label移除伪负例后的有效负样本少于20，则进入`U_INSUFFICIENT_VALID_NEGATIVES`，不根据百分比自动修改释义。
+
+## 29. 按Label导出正样本题目与DS判定
+
+为便于学科人工逐Label查看，将179,568个正样本题目—Label对导出为458个独立JSON文件。每个文件包含老师四列释义、分数分布统计、题干、选项、答案、解析和DS的`match/relevance_score/score_band`。题目默认按分数从低到高排列，便于优先复核疑似误挂题。
+
+```bash
+STANDALONE_SAMPLE_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_STANDALONE_SAMPLE_RUN)"
+STANDALONE_FULL_RUN="$(cat runtime/LATEST_DEFINITION_COVERAGE_STANDALONE_FULL_RUN)"
+REVIEW_EXPORT="/local_data/zhangyonglin/data/bio-know-tag/positive-review-by-label-$(date +%Y%m%d-%H%M%S)"
+
+PYTHONPATH=src python scripts/export_positive_review_by_label.py \
+  --tasks "$STANDALONE_SAMPLE_RUN/boundary_samples.jsonl" \
+  --results "$STANDALONE_FULL_RUN/results.jsonl" \
+  --labels configs/labels.jsonl \
+  --output-dir "$REVIEW_EXPORT"
+
+printf '%s\n' "$REVIEW_EXPORT" > runtime/LATEST_POSITIVE_REVIEW_EXPORT
+python -m json.tool "$REVIEW_EXPORT/report.json"
+python -m json.tool "$REVIEW_EXPORT/index.json" | head -n 80
+find "$REVIEW_EXPORT" -maxdepth 1 -type f -name '*.json' | wc -l
+du -sh "$REVIEW_EXPORT"
+```
+
+验收值：`labels_exported=458`、`labels_with_questions=458`、`questions_exported=179568`；目录中共460个JSON（458个Label文件+`index.json`+`report.json`）。当前数据预计占用约355MB。
