@@ -64,7 +64,7 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert "标签一定义" in prompt
     assert "标签一核心" in prompt
     assert "标签一边界" in prompt
-    assert "标签一考查" in prompt
+    assert "标签一考查" not in prompt
     assert "知识点@模块@标签一" in prompt
     assert "旧knw_ids" not in prompt
     assert "candidate_rank" not in prompt
@@ -121,13 +121,13 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v9_prompt_adds_generalized_specificity_gates_and_puts_reason_last():
+def test_v91_prompt_requires_scope_first_verbatim_evidence_and_puts_reason_last():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v9-generalized-specificity"
+    assert PROMPT_VERSION == "candidate-adjudication-v9.1-scope-evidence"
     assert "错标的代价远高于漏标" in prompt
     assert "七道硬门槛" in prompt
     assert "反证复核" in prompt
@@ -135,23 +135,29 @@ def test_v9_prompt_adds_generalized_specificity_gates_and_puts_reason_last():
     assert "不得因为研究对象、题干关键词或所属章节相同" in prompt
     assert "对象与限定词" in prompt
     assert "生命层级与作用通道" in prompt
-    assert "共享底层机制不足以迁移具体Label" in prompt
-    assert "属于Label定义的必要条件" in prompt
-    assert "通用原理、规律和机制可以跨材料应用" in prompt
-    assert "题目明确考查跨层级因果关系时允许合理多标" in prompt
+    assert "不得因底层机制相同而迁移具体Label" in prompt
+    assert "当前题目、答案或解析必须出现相同对象" in prompt
+    assert "名称和定义本身是通用原理、规律或机制" in prompt
+    assert "题目明确考查跨层级因果关系时才允许合理多标" in prompt
     assert "对象不同即拒绝" not in prompt
     assert "施肥过多" not in prompt
     assert "小分子跨膜" not in prompt
     assert "固定化脂酶" not in prompt
     assert "rejected_risky" not in prompt
+    assert "Label允许覆盖的范围" in prompt
+    assert "core_concepts只能解释已由上述字段确定的范围" in prompt
+    assert "特定疾病、物种、实验、材料、组织或应用场景" in prompt
+    assert "不得改写或补写题目中没有的对象" in prompt
+    assert "evidence必须是当前题干、选项、答案或解析中的简短原文" in prompt
     assert "reason用1至2句话、不超过120字" in prompt
     assert '"reason": "当前设问直接考查……"' in prompt
     assert '"selected": ["C01", "C05"]' in prompt
     schema = prompt.split("只输出一个JSON对象：", 1)[1]
-    assert schema.index('"selected"') < schema.index('"context_insufficient"')
+    assert schema.index('"selected"') < schema.index('"evidence"')
+    assert schema.index('"evidence"') < schema.index('"context_insufficient"')
     assert schema.index('"context_insufficient"') < schema.index('"need_expand_recall"')
     assert schema.index('"need_expand_recall"') < schema.index('"reason"')
-    assert "evidence" not in prompt
+    assert '"evidence": {"C01": "题目原文", "C05": "题目原文"}' in prompt
 
 
 def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
@@ -175,6 +181,7 @@ def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
             {
                 "reason": "解析中存在相关知识。",
                 "selected": ["C01"],
+                "evidence": {"C01": "解析"},
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -230,11 +237,12 @@ def test_prompt_restores_single_v83_question_object():
     )
 
 
-def test_validate_v85_adjudication_accepts_reason_and_final_selected_codes():
+def test_validate_v91_adjudication_accepts_reason_evidence_and_final_selected_codes():
     result = validate_adjudication_result(
         {
             "reason": "当前设问直接考查标签一和标签二。",
             "selected": ["C02", "C01", "C02"],
+            "evidence": {"C01": "题干", "C02": "答案"},
             "need_expand_recall": False,
             "context_insufficient": False,
         },
@@ -243,6 +251,7 @@ def test_validate_v85_adjudication_accepts_reason_and_final_selected_codes():
 
     assert result["reason"] == "当前设问直接考查标签一和标签二。"
     assert result["selected"] == ["C02", "C01"]
+    assert result["evidence"] == {"C02": "答案", "C01": "题干"}
     assert "rejected_risky" not in result
     assert result["none_of_candidates"] is False
     with pytest.raises(ValueError, match="short codes"):
@@ -250,6 +259,7 @@ def test_validate_v85_adjudication_accepts_reason_and_final_selected_codes():
             {
                 "reason": "理由",
                 "selected": [{"code": "C01", "evidence": "题干"}],
+                "evidence": {"C01": "题干"},
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -261,6 +271,7 @@ def test_validate_adjudication_derives_empty_state():
     valid = {
         "reason": "理由",
         "selected": ["C01"],
+        "evidence": {"C01": "题干"},
         "need_expand_recall": False,
         "context_insufficient": False,
     }
@@ -268,7 +279,7 @@ def test_validate_adjudication_derives_empty_state():
         "C01"
     ]
     empty = validate_adjudication_result(
-        {**valid, "selected": []},
+        {**valid, "selected": [], "evidence": {}},
         {"C01", "C02"},
     )
     assert empty["none_of_candidates"] is True
@@ -281,6 +292,7 @@ def test_validate_adjudication_requires_nonempty_string_reason(reason):
             {
                 "reason": reason,
                 "selected": [],
+                "evidence": {},
                 "need_expand_recall": True,
                 "context_insufficient": False,
             },
@@ -292,6 +304,7 @@ def test_validate_adjudication_drops_unknown_answer_code_when_expanding_recall()
     result = validate_adjudication_result(
         {
             "selected": ["D09"],
+            "evidence": {"D09": "题干"},
             "context_insufficient": False,
             "need_expand_recall": True,
             "reason": "正确知识点不在候选中，需要扩召。",
@@ -308,6 +321,7 @@ def test_validate_adjudication_safely_drops_unknown_code_and_forces_expansion():
     result = validate_adjudication_result(
         {
             "selected": ["D09"],
+            "evidence": {"D09": "题干"},
             "context_insufficient": False,
             "need_expand_recall": False,
             "reason": "选择D09。",
@@ -349,6 +363,9 @@ def test_validate_adjudication_candidate_and_context_states(
     value = {
         "reason": "简短理由",
         "selected": selected,
+        "evidence": {
+            code: "题干" for code in selected if isinstance(code, str)
+        } if isinstance(selected, list) else {},
         "need_expand_recall": expand,
         "context_insufficient": context,
     }
@@ -402,6 +419,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
             {
                 "reason": "当前题目直接考查标签28。",
                 "selected": [code_for_l28],
+                "evidence": {code_for_l28: "题干"},
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -476,7 +494,7 @@ def test_run_adjudication_records_tail_candidate_usage(tmp_path: Path):
     assert report["retry_error_types"] == {"ConnectionResetError": 1}
     assert "unverified_evidence_items" not in report
     assert "questions_with_unverified_evidence" not in report
-    assert "evidence" not in prediction["selected_labels"][0]
+    assert prediction["selected_labels"][0]["evidence"] == "题干"
     assert "evidence_verified" not in prediction["selected_labels"][0]
     assert "necessity" not in prediction["selected_labels"][0]
     assert prediction["usable_for_training"] is True
@@ -522,6 +540,7 @@ def test_run_adjudication_can_issue_requests_concurrently(tmp_path: Path):
             {
                 "reason": "当前题目直接考查标签1。",
                 "selected": ["C01"],
+                "evidence": {"C01": "题干"},
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -595,6 +614,7 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
             {
                 "reason": "当前题目直接考查标签1。",
                 "selected": ["C01"],
+                "evidence": {"C01": "题干"},
                 "need_expand_recall": False,
                 "context_insufficient": False,
             },
@@ -673,6 +693,7 @@ def test_run_adjudication_filters_risky_training_rows(
             {
                 "reason": "根据题目证据作出判断。",
                 "selected": selected,
+                "evidence": {code: "题干" for code in selected},
                 "need_expand_recall": expand,
                 "context_insufficient": context,
             },

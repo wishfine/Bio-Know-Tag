@@ -1448,6 +1448,48 @@ printf 'V9_RUN=%s PID=%s\n' "$V9_RUN" "$PID"
 
 验收时先看`candidate_count_distribution={"30":300}`和`prompt_version=candidate-adjudication-v9-generalized-specificity`；再比较V8.6的4道硬错、新墖候选第26–30名的实际选中数、空标/expand和可训练题数。保守增加无妨，但不允许因Top30或新Prompt增加新的明确错标。
 
+### V9.1范围优先+原文证据实验
+
+V9审计发现的主要问题不是候选缺失，而是DS命中`core_concepts`里的局部方法或底层机制后，忽略Label名称、路径、定义所限定的对象和作用通道。V9.1做三项定向改动：
+
+- 候选卡片不再发送`common_assessments`，避免题型示例扩大Label边界；
+- 明确`label_name + label_path + definition + distinctions`决定范围，`core_concepts`不得扩张范围；
+- 每个`selected`必须输出题干/选项/答案/解析中的短原文`evidence`。
+
+新建运行目录，不能在V9目录中续跑：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+AUDIT_SAMPLE_RUN="$(cat runtime/LATEST_ADJUDICATION_AUDIT_SAMPLE_RUN)"
+V9_HYBRID30_RUN="$(cat runtime/LATEST_V9_HYBRID30_RUN)"
+V91_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v91-top30"
+
+mkdir -p "$V91_RUN"
+printf '%s\n' "$V91_RUN" > runtime/LATEST_ADJUDICATION_V91_RUN
+
+nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
+  --candidates "$V9_HYBRID30_RUN/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$V91_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 20 \
+  --timeout 300 \
+  --retries 5 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --max-tokens 512 \
+  > "$V91_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$V91_RUN/pid"
+printf 'V91_RUN=%s PID=%s\n' "$V91_RUN" "$PID"
+```
+
+验收时要求`prompt_version=candidate-adjudication-v9.1-scope-evidence`，并重点复核4道硬错题。同时检查每个`selected_labels[]`都已物化`evidence`，不将缺少原文证据的输出直接用于训练。
+
 ## 25. Top25 + 当前458内旧knw_ids精判消融
 
 目的：保持原300题、V8.6 Prompt和DS参数不变，只把每题历史`knw_ids`中仍属于当前458的ID追加到原Top25候选。旧ID不直接作为答案，仍交给DS逐个精判；释义表外的旧ID直接删除。由于审计样本为了盲测已移除旧ID，追加脚本必须通过`question_id`回连全量`label_units.jsonl`。

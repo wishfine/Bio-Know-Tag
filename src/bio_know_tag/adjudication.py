@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9-generalized-specificity"
+PROMPT_VERSION = "candidate-adjudication-v9.1-scope-evidence"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -87,7 +87,6 @@ def build_adjudication_prompt(
                 "label_path": format_label_path(label.get("label_path")),
                 "definition": label.get("definition", ""),
                 "core_concepts": label.get("core_concepts", ""),
-                "common_assessments": label.get("common_assessments", ""),
                 "distinctions": label.get("distinctions", ""),
             }
         )
@@ -115,17 +114,17 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 
 七道硬门槛（必须全部通过）：
 1. 直接考查：正确解答当前设问确实需要该Label；仅出现于材料、父题背景、工具名或弱联想不通过。错误选项只有在判断其错误必须调用该知识时才算直接考查。
-2. 精确定义：题目考点完整落入definition和core_concepts，不得因共享一个名词就扩张Label。
-3. 考查维度：原理、现象、实验操作、实验设计、应用、方法、结论、发展史是不同维度，不能互相替代。common_assessments可帮助判定维度，但不能单独证明应入选。
-4. 对象与限定词：只有当物种、人群/疾病、组织/细胞、样品/环境或实验对象属于Label定义的必要条件时，题内才必须有该限定的直接证据。通用原理、规律和机制可以跨材料应用；但只是共享底层机制不足以迁移具体Label，不得把一个具体对象Label套到另一对象。
-5. 生命层级与作用通道：不得仅因宏观生命过程最终包含某个微观过程，就自动选择微观Label；也不得因微观机制相似就替代题目实际考查的宏观过程。只有当当前设问、选项判断、答案或解析明确需要该层级、结构或作用通道时才选择；题目明确考查跨层级因果关系时允许合理多标。
+2. Label范围优先：Label允许覆盖的范围由label_name、label_path、definition和distinctions共同确定。core_concepts只能解释已由上述字段确定的范围，不能扩大范围。只命中core_concepts中一个方法、实例、名词或底层机制，不足以选择该Label。
+3. 考查维度：原理、现象、实验操作、实验设计、应用、方法、结论、发展史是不同维度，不能互相替代。
+4. 对象与限定词：只有名称和定义本身是通用原理、规律或机制的Label，才允许跨材料应用。如果Label名称或definition包含特定疾病、物种、实验、材料、组织或应用场景，当前题目、答案或解析必须出现相同对象或明确考查该对象；不得因底层机制相同而迁移具体Label。
+5. 生命层级与作用通道：必须保持题目实际考查的对象、动作、生命层级、结构和作用通道一致。不得改写或补写题目中没有的对象、实验、结构、过程或作用通道。题目明确考查跨层级因果关系时才允许合理多标。
 6. 边界否决：distinctions是硬否决条件；只要题目落在它排除的一侧，立即拒绝。实验/方法Label还必须真正考实验目的、步骤、变量、现象、误差或方案评价，不得由同模块概念触发。
 7. 必要性反问：如果学生完全不会该Label，仍能依靠其他知识完整解决当前设问，则该Label不是必要考点，拒绝。
 
 选择规则：
 8. 只判断当前小题。parent_stem仅补足语境；父题其他内容和兄弟小题不选。
 9. 合理多标可以保留，但每一个Label都必须独立通过全部七道门槛；不得因已有一个正确Label就顺带加入相关Label。不得因为研究对象、题干关键词或所属章节相同，就用考查机制或维度不同的Label替代。
-10. 反证复核失败的候选直接从selected删除；reason只概括最终选择或置空的依据，不逐项输出被拒绝候选或详细思考过程。
+10. 每个selected都必须提供一条evidence。evidence必须是当前题干、选项、答案或解析中的简短原文，同时证明考点和Label所限定的对象、层级或作用通道。找不到直接原文证据就不得选择。
 11. 题目有明确生物考点，但没有任何候选能通过七道门槛时，selected=[]且need_expand_recall=true。宁可置空，不得选“最接近”的替代Label。
 12. 若已有安全Label，但可能漏掉不确定次要项，不要用猜测补齐；保留安全Label即可。
 13. 仅当缺图或缺父题材料导致连一个可靠Label都无法确定时，才设context_insufficient=true。答案或解析足以判断时必须为false。
@@ -139,11 +138,12 @@ C. 对暂定的selected做一次反证复核：主动寻找“为什么它不该
 候选Label（顺序不代表最终正确性）：
 {json.dumps(candidate_cards, ensure_ascii=False)}
 
-reason用1至2句话、不超过120字，说明当前设问、答案或解析如何支持selected；若置空，则说明是候选不匹配、需要扩召还是上下文不足。不要罗列全部候选，不要输出详细思考过程。
+evidence每条不超过60字，不得改写、推导或补写原文中没有的内容。reason用1至2句话、不超过120字，概括最终选择或置空依据，不罗列全部候选或输出详细思考过程。
 
 只输出一个JSON对象：
 {{
   "selected": ["C01", "C05"],
+  "evidence": {{"C01": "题目原文", "C05": "题目原文"}},
   "context_insufficient": false,
   "need_expand_recall": false,
   "reason": "当前设问直接考查……"
@@ -159,6 +159,7 @@ def validate_adjudication_result(
     required = (
         "reason",
         "selected",
+        "evidence",
         "need_expand_recall",
         "context_insufficient",
     )
@@ -199,9 +200,22 @@ def validate_adjudication_result(
     if len(reason) > 1000:
         raise ValueError("reason is too long")
     normalized = normalize_codes("selected")
+    raw_evidence = value["evidence"]
+    if not isinstance(raw_evidence, dict):
+        raise ValueError("evidence must be an object keyed by selected code")
+    normalized_evidence: dict[str, str] = {}
+    for code in normalized:
+        evidence = raw_evidence.get(code)
+        if not isinstance(evidence, str) or not evidence.strip():
+            raise ValueError(f"missing non-empty evidence for {code}")
+        evidence = evidence.strip()
+        if len(evidence) > 300:
+            raise ValueError(f"evidence for {code} is too long")
+        normalized_evidence[code] = evidence
     return {
         "reason": reason,
         "selected": normalized,
+        "evidence": normalized_evidence,
         "unknown_selected_codes_dropped": unknown_codes,
         "context_insufficient": value["context_insufficient"],
         "need_expand_recall": value["need_expand_recall"] or bool(unknown_codes),
@@ -484,6 +498,7 @@ def run_adjudication(
                         "sources": candidate.get("sources", []),
                         "sparse_rank": candidate.get("sparse_rank"),
                         "dense_rank": candidate.get("dense_rank"),
+                        "evidence": parsed["evidence"][code],
                     }
                 )
             selected_labels.sort(
