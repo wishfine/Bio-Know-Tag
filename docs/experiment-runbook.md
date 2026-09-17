@@ -1504,15 +1504,17 @@ Prompt中不写入果蝇、色盲或其他已知审计题的具体答案，避�
 
 ### V9.1c当前小题优先
 
-V9.1c只在V9.1b上增加一条边界：当前小题与父题背景的考查方向不同或冲突时，必须以当前小题的设问、答案和解析为唯一判标依据；`parent_stem`不得覆盖、扩张或替代当前设问的考点。输入字段、候选排列和输出协议均不变。
+V9.1c只在V9.1b上增加一条当前小题优先边界。该版本作为消融实验保留，不作为当前生产基线。
 
 ### V9.1d方法目的对齐
 
-V9.1d在V9.1c上增加可泛化的方法类边界：调查、取样、计数、测定和检测类Label必须同时对齐调查对象、目标指标/结论和使用方法。共享“统计、计数、取样”等动作词，或都涉及个体数量，不足以跨调查目标选标。该规则不写入任何已知审计题或具体Label名，用于阻断方法词表面相似导致的错标。
+V9.1d在V9.1c上增加方法目的对齐边界。同批297题中有61题相比V9.1b发生变化，但未消除河流生态修复题和固定化脲酶题的明确错标，且整体更倾向于出标。因此仅作为消融实验保留，正式Prompt回退到V9.1b。
 
-## 25. V9.1d + Top25 + 当前458内旧knw_ids
+## 25. V9.1b + Top25 + 当前458内旧knw_ids + 人工审计排除
 
-当前实验使用V9.1d Prompt。候选为原混合召回Top25，再追加每题历史`knw_ids`中仍属于当前458的ID。旧ID不直接作为答案，仍交给DS精判；释义表外的旧ID删除，与Top25重复的ID去重。DS看不到候选来源、排名或分数，无法知道哪个Label是旧`knw_ids`追加项。
+当前正式基线使用V9.1b Prompt。候选为原混合召回Top25，再追加每题历史`knw_ids`中仍属于当前458的ID。旧ID不直接作为答案，仍交给DS精判；释义表外的旧ID删除，与Top25重复的ID去重。DS看不到候选来源、排名或分数，无法知道哪个Label是旧`knw_ids`追加项。
+
+人工审计确认的“题目×错误Label”存放在`configs/adjudication_audited_exclusions.json`。这些规则不进入Prompt：程序在物化结果时删除已确认的错误Label，将排除记录写入`audited_excluded_labels`，并将该题标记为不可用于训练。当前规则删除河流生态修复题中的“种群密度的调查方法”，但保留其他正确Label供审计。
 
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
@@ -1541,15 +1543,16 @@ python -m json.tool "$LEGACY_AUG_RUN/report.json"
 这里故意不传`--max-legacy-additions`：同一题所有仍属于当前458的旧ID都应进入候选，报告中的候选数因此可能大于25。
 
 ```bash
-V91D_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v91d-top25-plus-legacy"
-mkdir -p "$V91D_LEGACY_RUN"
-printf '%s\n' "$V91D_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V91D_LEGACY_RUN
+V91B_LEGACY_RUN="runtime/$(date +%Y%m%d-%H%M%S)-candidate-judge-v91b-top25-plus-legacy-audited"
+mkdir -p "$V91B_LEGACY_RUN"
+printf '%s\n' "$V91B_LEGACY_RUN" > runtime/LATEST_ADJUDICATION_V91B_LEGACY_AUDITED_RUN
 
 nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --units "$AUDIT_SAMPLE_RUN/audit_units.jsonl" \
   --candidates "$LEGACY_AUG_RUN/candidates.jsonl" \
   --labels configs/labels.jsonl \
-  --run-dir "$V91D_LEGACY_RUN" \
+  --run-dir "$V91B_LEGACY_RUN" \
+  --audited-exclusions configs/adjudication_audited_exclusions.json \
   --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
   --model 'DeepSeek-V4-Flash' \
   --workers 20 \
@@ -1558,14 +1561,14 @@ nohup env PYTHONPATH=src python scripts/run_candidate_adjudication.py \
   --retry-delay 1 \
   --request-interval 0 \
   --max-tokens 256 \
-  > "$V91D_LEGACY_RUN/nohup.log" 2>&1 &
+  > "$V91B_LEGACY_RUN/nohup.log" 2>&1 &
 
 PID=$!
-printf '%s\n' "$PID" > "$V91D_LEGACY_RUN/pid"
-printf 'V91D_LEGACY_RUN=%s PID=%s\n' "$V91D_LEGACY_RUN" "$PID"
+printf '%s\n' "$PID" > "$V91B_LEGACY_RUN/pid"
+printf 'V91B_LEGACY_RUN=%s PID=%s\n' "$V91B_LEGACY_RUN" "$PID"
 ```
 
-验收时要求`prompt_version=candidate-adjudication-v9.1d-method-purpose-alignment`。重点比较明确错标数、原Top25空标题是否被正确旧ID救回、是否因旧标签噪声新增错标及`usable_for_training`。这个实验不把旧ID当金标。
+验收时要求`prompt_version=candidate-adjudication-v9.1b-compact-hard-boundaries`。报告中的`audited_exclusion_questions`/`audited_excluded_labels`记录确定性排除；命中规则的题进入`training_filter_reasons.audited_exclusion`，不进训练集。
 
 ## 26. 生物Label释义覆盖实验（每Label最多500题）
 

@@ -18,6 +18,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--units", type=Path, required=True)
     parser.add_argument("--candidates", type=Path, required=True)
     parser.add_argument("--labels", type=Path, default=Path("configs/labels.jsonl"))
+    parser.add_argument(
+        "--audited-exclusions",
+        type=Path,
+        default=Path("configs/adjudication_audited_exclusions.json"),
+    )
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--endpoint", action="append", dest="endpoints")
     parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
@@ -70,6 +75,7 @@ def main() -> int:
         limit=args.limit,
         max_tokens=args.max_tokens,
         workers=args.workers,
+        audited_exclusions_path=args.audited_exclusions,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1

@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9.1d-method-purpose-alignment"
+PROMPT_VERSION = "candidate-adjudication-v9.1b-compact-hard-boundaries"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -57,6 +57,60 @@ def _ensure_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
             raise ValueError("run manifest mismatch; use a new run directory")
         return
     _write_json_atomic(path, manifest)
+
+
+def load_audited_exclusions(
+    path: str | Path,
+) -> dict[tuple[str, str], dict[str, str]]:
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or not isinstance(value.get("rules"), list):
+        raise ValueError("audited exclusions must contain a rules list")
+    rules: dict[tuple[str, str], dict[str, str]] = {}
+    allowed_actions = {"remove_label", "remove_label_and_exclude_training"}
+    for index, raw_rule in enumerate(value["rules"], 1):
+        if not isinstance(raw_rule, dict):
+            raise ValueError(f"audited exclusion rule {index} must be an object")
+        question_id = str(raw_rule.get("question_id") or "").strip()
+        label_id = str(raw_rule.get("label_id") or "").strip()
+        action = str(raw_rule.get("action") or "").strip()
+        reason = str(raw_rule.get("reason") or "").strip()
+        if not question_id or not label_id or not reason:
+            raise ValueError(f"audited exclusion rule {index} has an empty field")
+        if action not in allowed_actions:
+            raise ValueError(f"audited exclusion rule {index} has invalid action")
+        key = (question_id, label_id)
+        if key in rules:
+            raise ValueError(f"duplicate audited exclusion: {question_id}::{label_id}")
+        rules[key] = {"action": action, "reason": reason}
+    return rules
+
+
+def apply_audited_exclusions(
+    question_id: str,
+    selected_labels: list[dict[str, Any]],
+    rules: dict[tuple[str, str], dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, str]], bool]:
+    kept: list[dict[str, Any]] = []
+    removed: list[dict[str, str]] = []
+    exclude_training = False
+    for label in selected_labels:
+        label_id = str(label.get("label_id") or "")
+        rule = rules.get((str(question_id), label_id))
+        if not rule:
+            kept.append(label)
+            continue
+        removed.append(
+            {
+                "label_id": label_id,
+                "label_name": str(label.get("label_name") or ""),
+                "action": rule["action"],
+                "reason": rule["reason"],
+            }
+        )
+        exclude_training = exclude_training or rule["action"].endswith(
+            "exclude_training"
+        )
+    return kept, removed, exclude_training
 
 
 def build_adjudication_prompt(
@@ -116,9 +170,8 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 1. 对象不一致：若Label被限定到特定物种、疾病、性状、实验、材料、组织、器官、细胞类型、技术或应用场景，则当前题目必须实际考查同一对象。不得因遗传方式、分子/生理机制、实验原理相同，而把具体对象A横向迁移到具体对象B的Label。具体对象题可以选其真正考查的通用上位机制Label。对象一致只是必要条件，不是选中条件。
 2. 任务或维度不一致：原理/规律、结构、功能、现象、生理过程、实验原理、实验操作/设计/结果、判定方法、应用、结论和科学史不能互相替代。题目只是使用已知结论完成推断，不等于考查该结论的判定方法或发现实验。
 3. 生命层级、结构或作用通道不一致：不得因宏观过程包含某个微观机制，或微观机制相似，就用不同层级的Label替代当前考点。
-4. 当前小题范围不一致：只判断当前小题。parent_stem只能在当前小题存在“该患者、该实验、图中”等明确指代时补足对象和语境，不能单独制造考点。当前小题与父题背景的考查方向不同或冲突时，必须以当前小题的设问、答案和解析为唯一判标依据；parent_stem不得覆盖、扩张或替代当前设问的考点。父题其他内容和兄弟小题的知识不选。
+4. 当前小题范围不一致：只判断当前小题。parent_stem只能在当前小题存在“该患者、该实验、图中”等明确指代时补足对象和语境，不能单独制造考点。父题其他内容和兄弟小题的知识不选。
 5. 与distinctions冲突：若题目落在distinctions排除的一侧，立即拒绝。
-6. 方法目的或结果指标不一致：对调查、取样、计数、测定、检测等Label，必须同时核对“对象是什么、要得到什么指标或结论、使用什么方法”。只有统计、计数、取样等动作词相同，或都涉及个体数量，但调查对象、目标指标或结果含义不同，必须拒绝。
 
 三、还原当前任务
 通过硬否决后，仅根据当前stem、options、answer_text和analysis，判断学生为了得出正确答案必须完成哪些具体判断。材料中出现的概念、解析为讲解完整而补充的背景，不自动算考点。错误选项只有在判断它错误必须调用该知识，且它构成题目的实质性考查而非孤立干扰信息时，才可支持该Label。
@@ -131,7 +184,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 
 五、特殊Label
 1. 通用机制Label：若Label定义的是通用原理、规律、分类或方法，且题目确实直接应用它完成判断，可以跨不同材料实例选择。但具体对象A只能上溯到通用机制Label，不能横向迁移到共享机制的具体对象B Label。
-2. 实验、方法、观察、调查、测定、制作、构建、判定类Label：只有当前设问真正要求学生判断对应目的、原理、步骤、变量、现象、结果、误差、方案或判定方法本身时才选择。选中前必须确认该Label的对象、方法目的和结果指标均与当前任务一致。只是使用该实验的结论、出现名称/材料，或利用已知对象信息做其他推断，都不选该类Label。
+2. 实验、方法、观察、调查、测定、制作、构建、判定类Label：只有当前设问真正要求学生判断对应目的、原理、步骤、变量、现象、结果、误差、方案或判定方法本身时才选择。只是使用该实验的结论、出现名称/材料，或利用已知对象信息做其他推断，都不选该类Label。
 3. 综合Label：只有当前设问要求联动多个子知识得出一个联合结论时才选择。题目包含多个彼此独立的子知识，不等于考查综合Label；“综合、其他、应用”不得作为候选不精确时的兜底。
 
 六、evidence与最终复核
@@ -264,6 +317,7 @@ def run_adjudication(
     limit: int | None = None,
     max_tokens: int = 1024,
     workers: int = 1,
+    audited_exclusions_path: str | Path | None = None,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -278,6 +332,11 @@ def run_adjudication(
     labels_by_id = {
         str(row["label_id"]): row for row in _read_jsonl(labels_path)
     }
+    audited_exclusions = (
+        load_audited_exclusions(audited_exclusions_path)
+        if audited_exclusions_path is not None
+        else {}
+    )
     expected_ids = [str(unit.get("question_id") or "") for unit in units]
     if any(not question_id for question_id in expected_ids):
         raise ValueError("every unit must have question_id")
@@ -318,6 +377,12 @@ def run_adjudication(
         },
         "candidate_retrieval_versions": candidate_versions,
         "candidate_count_distribution": candidate_count_distribution,
+        "audited_exclusions": {
+            "path": str(Path(audited_exclusions_path)),
+            "sha256": _file_sha256(audited_exclusions_path),
+        }
+        if audited_exclusions_path is not None
+        else None,
     }
     _ensure_run_manifest(output_dir / "run_manifest.json", manifest)
     completed, evidence_rows = _latest_success(
@@ -468,6 +533,8 @@ def run_adjudication(
     questions_with_unknown_selected_codes = 0
     usable_for_training_count = 0
     training_filter_reasons: Counter[str] = Counter()
+    audited_exclusion_questions = 0
+    audited_excluded_labels = 0
     with (
         temporary.open("w", encoding="utf-8", newline="\n") as output,
         tail_temporary.open("w", encoding="utf-8", newline="\n") as tail_output,
@@ -492,15 +559,6 @@ def run_adjudication(
                 label = labels_by_id[label_id]
                 candidate = candidates_by_id[label_id]
                 rank = int(candidate.get("candidate_rank") or candidate.get("rank") or 0)
-                if rank > 0:
-                    selected_rank_distribution[str(rank)] += 1
-                    max_selected_rank = max(max_selected_rank, rank)
-                used_tail = used_tail or 21 <= rank <= 25
-                selected_from_tail += int(21 <= rank <= 25)
-                used_rank_21_plus = used_rank_21_plus or rank >= 21
-                selected_from_rank_21_plus += int(rank >= 21)
-                used_rank_26_30 = used_rank_26_30 or 26 <= rank <= 30
-                selected_from_rank_26_30 += int(26 <= rank <= 30)
                 selected_labels.append(
                     {
                         "label_id": label_id,
@@ -513,9 +571,28 @@ def run_adjudication(
                         "evidence": parsed["evidence"][code],
                     }
                 )
+            selected_labels, removed_by_audit, exclude_from_training = (
+                apply_audited_exclusions(
+                    question_id, selected_labels, audited_exclusions
+                )
+            )
             selected_labels.sort(
                 key=lambda item: (item["candidate_rank"], item["label_id"])
             )
+            if removed_by_audit:
+                audited_exclusion_questions += 1
+                audited_excluded_labels += len(removed_by_audit)
+            for label in selected_labels:
+                rank = int(label["candidate_rank"])
+                if rank > 0:
+                    selected_rank_distribution[str(rank)] += 1
+                    max_selected_rank = max(max_selected_rank, rank)
+                used_tail = used_tail or 21 <= rank <= 25
+                selected_from_tail += int(21 <= rank <= 25)
+                used_rank_21_plus = used_rank_21_plus or rank >= 21
+                selected_from_rank_21_plus += int(rank >= 21)
+                used_rank_26_30 = used_rank_26_30 or 26 <= rank <= 30
+                selected_from_rank_26_30 += int(26 <= rank <= 30)
             questions_using_tail += int(used_tail)
             questions_using_rank_21_plus += int(used_rank_21_plus)
             questions_using_rank_26_30 += int(used_rank_26_30)
@@ -533,12 +610,14 @@ def run_adjudication(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
                 or text_content_missing
+                or exclude_from_training
             )
             usable_for_training = bool(
                 selected_labels
                 and not parsed["need_expand_recall"]
                 and not parsed["context_insufficient"]
                 and not text_content_missing
+                and not exclude_from_training
             )
             usable_for_training_count += int(usable_for_training)
             if not selected_labels:
@@ -549,12 +628,15 @@ def run_adjudication(
                 training_filter_reasons["context_insufficient"] += 1
             if text_content_missing:
                 training_filter_reasons["missing_question_text"] += 1
+            if exclude_from_training:
+                training_filter_reasons["audited_exclusion"] += 1
             prediction = {
                 "question_id": question_id,
                 "parent_id": unit.get("parent_id", question_id),
                 "unit_type": unit.get("unit_type", ""),
                 "reason": parsed["reason"],
                 "selected_labels": selected_labels,
+                "audited_excluded_labels": removed_by_audit,
                 "unknown_selected_codes_dropped": parsed.get(
                     "unknown_selected_codes_dropped", []
                 ),
@@ -717,6 +799,8 @@ def run_adjudication(
         "usable_for_training": usable_for_training_count,
         "filtered_from_training": success - usable_for_training_count,
         "training_filter_reasons": dict(sorted(training_filter_reasons.items())),
+        "audited_exclusion_questions": audited_exclusion_questions,
+        "audited_excluded_labels": audited_excluded_labels,
         "input_sha256": manifest["input_sha256"],
         "candidate_retrieval_versions": candidate_versions,
         "candidate_count_distribution": candidate_count_distribution,

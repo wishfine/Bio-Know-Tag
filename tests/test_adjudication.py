@@ -8,7 +8,9 @@ import pytest
 
 from bio_know_tag.adjudication import (
     PROMPT_VERSION,
+    apply_audited_exclusions,
     build_adjudication_prompt,
+    load_audited_exclusions,
     run_adjudication,
     validate_adjudication_result,
 )
@@ -51,6 +53,144 @@ def _candidate(index: int) -> dict:
         "sparse_rank": index if index < 20 else None,
         "dense_rank": index if index >= 20 else None,
     }
+
+
+def test_audited_exclusion_removes_only_the_known_bad_question_label_pair(
+    tmp_path: Path,
+):
+    rules_path = tmp_path / "audited-exclusions.json"
+    rules_path.write_text(
+        json.dumps(
+            {
+                "version": "audited-exclusions-v1",
+                "rules": [
+                    {
+                        "question_id": "river-question",
+                        "label_id": "population-density",
+                        "action": "remove_label_and_exclude_training",
+                        "reason": "人工审计确认调查目标不同。",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    rules = load_audited_exclusions(rules_path)
+    selected = [
+        {"label_id": "succession", "label_name": "群落的演替"},
+        {"label_id": "population-density", "label_name": "种群密度的调查方法"},
+    ]
+
+    kept, removed, exclude_training = apply_audited_exclusions(
+        "river-question", selected, rules
+    )
+
+    assert [item["label_id"] for item in kept] == ["succession"]
+    assert removed == [
+        {
+            "label_id": "population-density",
+            "label_name": "种群密度的调查方法",
+            "action": "remove_label_and_exclude_training",
+            "reason": "人工审计确认调查目标不同。",
+        }
+    ]
+    assert exclude_training is True
+
+    untouched, untouched_removed, untouched_excluded = apply_audited_exclusions(
+        "other-question", selected, rules
+    )
+    assert untouched == selected
+    assert untouched_removed == []
+    assert untouched_excluded is False
+
+
+def test_run_adjudication_materializes_audited_exclusion_and_filters_training(
+    tmp_path: Path,
+):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    rules_path = tmp_path / "audited-exclusions.json"
+    output = tmp_path / "judge"
+    unit = {**_unit(), "question_id": "river-question"}
+    candidates = [_candidate(1), _candidate(2)]
+    labels = {"L1": _label("L1", "正确标签"), "L2": _label("L2", "错误标签")}
+    units_path.write_text(
+        json.dumps(unit, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    candidates_path.write_text(
+        json.dumps(
+            {"question_id": "river-question", "candidates": candidates},
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        "".join(
+            json.dumps(label, ensure_ascii=False) + "\n"
+            for label in labels.values()
+        ),
+        encoding="utf-8",
+    )
+    rules_path.write_text(
+        json.dumps(
+            {
+                "version": "audited-exclusions-v1",
+                "rules": [
+                    {
+                        "question_id": "river-question",
+                        "label_id": "L2",
+                        "action": "remove_label_and_exclude_training",
+                        "reason": "人工审计确认错标。",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _, code_map = build_adjudication_prompt(unit, candidates, labels)
+    selected_codes = list(code_map)
+
+    class Response:
+        content = json.dumps(
+            {
+                "reason": "模型选中了两个标签。",
+                "selected": selected_codes,
+                "evidence": {code: "题干" for code in selected_codes},
+                "need_expand_recall": False,
+                "context_insufficient": False,
+            },
+            ensure_ascii=False,
+        )
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="fake-model",
+        audited_exclusions_path=rules_path,
+    )
+
+    prediction = json.loads((output / "predictions.jsonl").read_text())
+    assert [item["label_id"] for item in prediction["selected_labels"]] == ["L1"]
+    assert prediction["audited_excluded_labels"][0]["label_id"] == "L2"
+    assert prediction["usable_for_training"] is False
+    assert prediction["needs_review"] is True
+    assert report["audited_exclusion_questions"] == 1
+    assert report["audited_excluded_labels"] == 1
+    assert report["training_filter_reasons"] == {"audited_exclusion": 1}
 
 
 def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
@@ -121,13 +261,13 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v91d_prompt_aligns_method_purpose_and_prioritizes_current_question():
+def test_v91b_prompt_is_compact_and_enforces_hard_boundaries():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v9.1d-method-purpose-alignment"
+    assert PROMPT_VERSION == "candidate-adjudication-v9.1b-compact-hard-boundaries"
     assert "错标的代价远高于漏标" in prompt
     assert "硬否决：任意一项成立就拒绝，后续不得翻回" in prompt
     assert "反证复核" in prompt
@@ -135,14 +275,8 @@ def test_v91d_prompt_aligns_method_purpose_and_prioritizes_current_question():
     assert "题目只是使用已知结论完成推断" in prompt
     assert "生命层级、结构或作用通道不一致" in prompt
     assert "parent_stem只能在当前小题存在" in prompt
-    assert "当前小题与父题背景的考查方向不同或冲突时" in prompt
-    assert "parent_stem不得覆盖、扩张或替代当前设问的考点" in prompt
-    assert "方法目的或结果指标不一致" in prompt
-    assert "对象是什么、要得到什么指标或结论、使用什么方法" in prompt
-    assert "调查对象、目标指标或结果含义不同，必须拒绝" in prompt
     assert "具体对象A只能上溯到通用机制Label" in prompt
     assert "实验、方法、观察、调查、测定、制作、构建、判定类Label" in prompt
-    assert "Label的对象、方法目的和结果指标均与当前任务一致" in prompt
     assert "综合Label" in prompt
     assert "多个彼此独立的子知识，不等于考查综合Label" in prompt
     assert "施肥过多" not in prompt

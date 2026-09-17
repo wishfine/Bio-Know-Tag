@@ -1,0 +1,11 @@
+{
+  "version": "audited-exclusions-v1",
+  "rules": [
+    {
+      "question_id": "2554732457341837312",
+      "label_id": "2276104215104606208",
+      "action": "remove_label_and_exclude_training",
+      "reason": "人工审计确认：本题记名计算法用于群落丰富度统计，不属于种群密度调查。"
+    }
+  ]
+}
