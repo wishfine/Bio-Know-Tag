@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9.1c-current-question-priority"
+PROMPT_VERSION = "candidate-adjudication-v9.1d-method-purpose-alignment"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -118,6 +118,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 3. 生命层级、结构或作用通道不一致：不得因宏观过程包含某个微观机制，或微观机制相似，就用不同层级的Label替代当前考点。
 4. 当前小题范围不一致：只判断当前小题。parent_stem只能在当前小题存在“该患者、该实验、图中”等明确指代时补足对象和语境，不能单独制造考点。当前小题与父题背景的考查方向不同或冲突时，必须以当前小题的设问、答案和解析为唯一判标依据；parent_stem不得覆盖、扩张或替代当前设问的考点。父题其他内容和兄弟小题的知识不选。
 5. 与distinctions冲突：若题目落在distinctions排除的一侧，立即拒绝。
+6. 方法目的或结果指标不一致：对调查、取样、计数、测定、检测等Label，必须同时核对“对象是什么、要得到什么指标或结论、使用什么方法”。只有统计、计数、取样等动作词相同，或都涉及个体数量，但调查对象、目标指标或结果含义不同，必须拒绝。
 
 三、还原当前任务
 通过硬否决后，仅根据当前stem、options、answer_text和analysis，判断学生为了得出正确答案必须完成哪些具体判断。材料中出现的概念、解析为讲解完整而补充的背景，不自动算考点。错误选项只有在判断它错误必须调用该知识，且它构成题目的实质性考查而非孤立干扰信息时，才可支持该Label。
@@ -130,7 +131,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 
 五、特殊Label
 1. 通用机制Label：若Label定义的是通用原理、规律、分类或方法，且题目确实直接应用它完成判断，可以跨不同材料实例选择。但具体对象A只能上溯到通用机制Label，不能横向迁移到共享机制的具体对象B Label。
-2. 实验、方法、观察、调查、测定、制作、构建、判定类Label：只有当前设问真正要求学生判断对应目的、原理、步骤、变量、现象、结果、误差、方案或判定方法本身时才选择。只是使用该实验的结论、出现名称/材料，或利用已知对象信息做其他推断，都不选该类Label。
+2. 实验、方法、观察、调查、测定、制作、构建、判定类Label：只有当前设问真正要求学生判断对应目的、原理、步骤、变量、现象、结果、误差、方案或判定方法本身时才选择。选中前必须确认该Label的对象、方法目的和结果指标均与当前任务一致。只是使用该实验的结论、出现名称/材料，或利用已知对象信息做其他推断，都不选该类Label。
 3. 综合Label：只有当前设问要求联动多个子知识得出一个联合结论时才选择。题目包含多个彼此独立的子知识，不等于考查综合Label；“综合、其他、应用”不得作为候选不精确时的兜底。
 
 六、evidence与最终复核

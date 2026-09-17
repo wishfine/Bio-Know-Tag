@@ -121,13 +121,13 @@ def test_candidate_order_uses_v83_seed_for_clean_reason_ablation():
     assert list(code_map.values()) == expected
 
 
-def test_v91c_prompt_is_compact_and_prioritizes_current_question():
+def test_v91d_prompt_aligns_method_purpose_and_prioritizes_current_question():
     labels = {"L1": _label("L1", "标签一"), "L2": _label("L2", "标签二")}
     prompt, _ = build_adjudication_prompt(
         _unit(), [_candidate(1), _candidate(2)], labels
     )
 
-    assert PROMPT_VERSION == "candidate-adjudication-v9.1c-current-question-priority"
+    assert PROMPT_VERSION == "candidate-adjudication-v9.1d-method-purpose-alignment"
     assert "错标的代价远高于漏标" in prompt
     assert "硬否决：任意一项成立就拒绝，后续不得翻回" in prompt
     assert "反证复核" in prompt
@@ -137,8 +137,12 @@ def test_v91c_prompt_is_compact_and_prioritizes_current_question():
     assert "parent_stem只能在当前小题存在" in prompt
     assert "当前小题与父题背景的考查方向不同或冲突时" in prompt
     assert "parent_stem不得覆盖、扩张或替代当前设问的考点" in prompt
+    assert "方法目的或结果指标不一致" in prompt
+    assert "对象是什么、要得到什么指标或结论、使用什么方法" in prompt
+    assert "调查对象、目标指标或结果含义不同，必须拒绝" in prompt
     assert "具体对象A只能上溯到通用机制Label" in prompt
     assert "实验、方法、观察、调查、测定、制作、构建、判定类Label" in prompt
+    assert "Label的对象、方法目的和结果指标均与当前任务一致" in prompt
     assert "综合Label" in prompt
     assert "多个彼此独立的子知识，不等于考查综合Label" in prompt
     assert "施肥过多" not in prompt
