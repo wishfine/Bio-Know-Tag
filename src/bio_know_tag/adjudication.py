@@ -16,7 +16,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "candidate-adjudication-v9.1b-compact-hard-boundaries"
+PROMPT_VERSION = "candidate-adjudication-v9.1c-current-question-priority"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -116,7 +116,7 @@ Label有效范围由label_name、label_path、definition和distinctions共同确
 1. 对象不一致：若Label被限定到特定物种、疾病、性状、实验、材料、组织、器官、细胞类型、技术或应用场景，则当前题目必须实际考查同一对象。不得因遗传方式、分子/生理机制、实验原理相同，而把具体对象A横向迁移到具体对象B的Label。具体对象题可以选其真正考查的通用上位机制Label。对象一致只是必要条件，不是选中条件。
 2. 任务或维度不一致：原理/规律、结构、功能、现象、生理过程、实验原理、实验操作/设计/结果、判定方法、应用、结论和科学史不能互相替代。题目只是使用已知结论完成推断，不等于考查该结论的判定方法或发现实验。
 3. 生命层级、结构或作用通道不一致：不得因宏观过程包含某个微观机制，或微观机制相似，就用不同层级的Label替代当前考点。
-4. 当前小题范围不一致：只判断当前小题。parent_stem只能在当前小题存在“该患者、该实验、图中”等明确指代时补足对象和语境，不能单独制造考点。父题其他内容和兄弟小题的知识不选。
+4. 当前小题范围不一致：只判断当前小题。parent_stem只能在当前小题存在“该患者、该实验、图中”等明确指代时补足对象和语境，不能单独制造考点。当前小题与父题背景的考查方向不同或冲突时，必须以当前小题的设问、答案和解析为唯一判标依据；parent_stem不得覆盖、扩张或替代当前设问的考点。父题其他内容和兄弟小题的知识不选。
 5. 与distinctions冲突：若题目落在distinctions排除的一侧，立即拒绝。
 
 三、还原当前任务
