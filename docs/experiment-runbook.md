@@ -1704,3 +1704,95 @@ python -m json.tool "$COMBINED_RUN/report.json"
 ```
 
 负样本误收率初筛：不超过5%为稳定，5%至15%为轻微边界风险，15%至30%为疑似偏宽/重叠，超过30%为严重边界冲突。组合报告对少于300道正样本的Label始终保留`U_LONG_TAIL_REVIEW`，不会因比例自动修改释义。
+
+## 28. 已接受兄弟题的二次共标Judge
+
+第一阶段硬负样本只能测量“兄弟题接受率”，不能直接当作错标率。同父级Label可能存在上下位包含、综合—原子关系、比较Label与单端Label重叠，也可能是历史来源Label漏标。因此对第一阶段接受的5,555条再进行一次最小充分知识集裁决，结论仅允许：
+
+- `合理共标`；
+- `目标Label边界过宽`；
+- `来源Label不足以描述该题`；
+- `无法判断`。
+
+Prompt不向DS提供第一阶段分数，避免锚定。它明确禁止上位+下位机械双标，要求综合Label实际联动多个子模块，比较Label实际比较双方，实验Label必须考实验任务本身。
+
+### 28.1 20条smoke
+
+```bash
+HARD_NEG_SAMPLE_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_SAMPLE_RUN)"
+HARD_NEG_DS_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_DS_RUN)"
+COLABEL_SMOKE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-co-label-judge-smoke20"
+mkdir -p "$COLABEL_SMOKE_RUN"
+
+PYTHONPATH=src python scripts/run_co_label_judge.py \
+  --samples "$HARD_NEG_SAMPLE_RUN/hard_negative_samples.jsonl" \
+  --first-stage-results "$HARD_NEG_DS_RUN/results.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$COLABEL_SMOKE_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 4 \
+  --max-batch-size 20 \
+  --char-budget 45000 \
+  --max-tokens 3000 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  --limit 20
+
+python -m json.tool "$COLABEL_SMOKE_RUN/report.json"
+head -n 5 "$COLABEL_SMOKE_RUN/results.jsonl"
+```
+
+验收`input=processed=success=20`、`error=pending=0`，并检查四类决策字段可正常解析。
+
+### 28.2 全量5,555条
+
+```bash
+COLABEL_RUN="runtime/$(date +%Y%m%d-%H%M%S)-co-label-judge-full-w30"
+mkdir -p "$COLABEL_RUN"
+printf '%s\n' "$COLABEL_RUN" > runtime/LATEST_CO_LABEL_JUDGE_RUN
+
+nohup env PYTHONPATH=src python scripts/run_co_label_judge.py \
+  --samples "$HARD_NEG_SAMPLE_RUN/hard_negative_samples.jsonl" \
+  --first-stage-results "$HARD_NEG_DS_RUN/results.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$COLABEL_RUN" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'DeepSeek-V4-Flash' \
+  --workers 30 \
+  --max-batch-size 20 \
+  --char-budget 45000 \
+  --max-tokens 3000 \
+  --timeout 600 \
+  --retries 3 \
+  --retry-delay 1 \
+  --request-interval 0 \
+  > "$COLABEL_RUN/nohup.log" 2>&1 &
+
+PID=$!
+printf '%s\n' "$PID" > "$COLABEL_RUN/pid"
+printf 'COLABEL_RUN=%s PID=%s\n' "$COLABEL_RUN" "$PID"
+```
+
+运行器按完整Prompt字符数控制45000上限，同时支持原目录续跑和HTTP 400/结构输出错误自动二分。
+
+### 28.3 校正后的边界误收率
+
+```bash
+POSITIVE_ANALYSIS_RUN="$(cat runtime/LATEST_STANDALONE_POSITIVE_ANALYSIS_RUN)"
+HARD_NEG_ANALYSIS_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_ANALYSIS_RUN)"
+CORRECTED_RUN="runtime/$(date +%Y%m%d-%H%M%S)-corrected-boundary-combined"
+
+PYTHONPATH=src python scripts/combine_corrected_boundary_results.py \
+  --positive-per-label "$POSITIVE_ANALYSIS_RUN/per_label.jsonl" \
+  --negative-per-label "$HARD_NEG_ANALYSIS_RUN/per_label.jsonl" \
+  --colabel-per-target "$COLABEL_RUN/per_target_label.jsonl" \
+  --run-dir "$CORRECTED_RUN"
+
+printf '%s\n' "$CORRECTED_RUN" > runtime/LATEST_CORRECTED_BOUNDARY_RUN
+python -m json.tool "$CORRECTED_RUN/report.json"
+```
+
+校正时，`reasonable_colabel`和`source_label_insufficient`从负样本分母中移除；只有`目标Label边界过宽`计为真正误收。若某Label移除伪负例后的有效负样本少于20，则进入`U_INSUFFICIENT_VALID_NEGATIVES`，不根据百分比自动修改释义。
