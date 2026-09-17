@@ -21,7 +21,7 @@ from bio_know_tag.ds import DSRequestError, append_evidence, parse_json_content
 from bio_know_tag.retrieval import format_label_path
 
 
-PROMPT_VERSION = "definition-verifier-v1-independent"
+PROMPT_VERSION = "definition-verifier-v1.1-explicit-subcase"
 ORDER_VERSION = "definition-verifier-v1-order"
 
 
@@ -74,8 +74,17 @@ def build_definition_verifier_prompt(
 2. 对象、任务、目标或层级任一不同，match=false。
 3. 仅共享名词、底层机制、材料背景、父题主题、上下游步骤或一般方法，match=false。
 4. Label定义若限定特定实验/方法/调查目标，题目必须实际考查该目标；仅考查后续产物、测定、应用或其他同类方法时为false。
-5. 只有部分相符、边界不确定或需要用定义之外的常识扩张才能成立时，统一为false。
-6. parent_context_for_reference_only只能解除“该实验/该物质/图中”等指代，不能替代当前设问制造考点。
+5. 定义明确列出的一个子项、类型或备选方法，若当前题直接考查该子项，属于EXPLICIT_SUBCASE，match=true；不要因为题目没有考完整个Label而拒绝。
+6. 未在定义中出现的同类方法、平行子项或下游任务，即使共享“调查/计数/检测/测定”等上位词，也是UNLISTED_SIBLING，match=false。不得用定义之外的常识把它扩展进Label。
+7. parent_context_for_reference_only只能解除“该实验/该物质/图中”等指代，不能替代当前设问制造考点。
+
+必须先选coverage_relation：
+- EXACT：当前任务与定义主体完全一致。
+- EXPLICIT_SUBCASE：当前任务是定义明确列出的子项。
+- UNLISTED_SIBLING：属于相近大类，但具体方法/对象/任务未被定义列出。
+- BACKGROUND_ONLY：只是材料、父题或解释背景。
+- DIFFERENT_TASK：对象、目标、层级或任务不同。
+仅EXACT和EXPLICIT_SUBCASE对应match=true，其余必须为false。
 
 题目：
 {json.dumps(question, ensure_ascii=False)}
@@ -90,6 +99,7 @@ def build_definition_verifier_prompt(
     {{
       "code": "V01",
       "match": false,
+      "coverage_relation": "UNLISTED_SIBLING",
       "question_target": "当前设问真正考什么",
       "definition_target": "Label定义限定考什么",
       "reason": "为什么一致或不一致"
@@ -117,7 +127,24 @@ def validate_definition_verifier_result(
             raise ValueError(f"duplicate result code: {code}")
         if not isinstance(item.get("match"), bool):
             raise ValueError(f"match must be boolean for {code}")
-        record = {"code": code, "match": item["match"]}
+        coverage_relation = item.get("coverage_relation")
+        allowed_relations = {
+            "EXACT",
+            "EXPLICIT_SUBCASE",
+            "UNLISTED_SIBLING",
+            "BACKGROUND_ONLY",
+            "DIFFERENT_TASK",
+        }
+        if coverage_relation not in allowed_relations:
+            raise ValueError(f"invalid coverage_relation for {code}")
+        expected_match = coverage_relation in {"EXACT", "EXPLICIT_SUBCASE"}
+        if item["match"] is not expected_match:
+            raise ValueError(f"match conflicts with coverage_relation for {code}")
+        record = {
+            "code": code,
+            "match": item["match"],
+            "coverage_relation": coverage_relation,
+        }
         for field in ("question_target", "definition_target", "reason"):
             text = item.get(field)
             if not isinstance(text, str) or not text.strip():
@@ -142,7 +169,6 @@ def _latest_success(path: Path) -> tuple[dict[str, dict[str, Any]], int]:
         rows += 1
         if (
             record.get("prompt_version") == PROMPT_VERSION
-            and not record.get("error")
             and isinstance(record.get("parsed_response"), list)
         ):
             latest[str(record["question_id"])] = record

@@ -63,7 +63,7 @@ def test_definition_verifier_prompt_is_independent_and_definition_only():
         _unit(), _prediction(), _labels()
     )
 
-    assert PROMPT_VERSION == "definition-verifier-v1-independent"
+    assert PROMPT_VERSION == "definition-verifier-v1.1-explicit-subcase"
     assert set(code_map.values()) == {"L1", "L2"}
     assert "当前小题" in prompt
     assert "父题背景" in prompt
@@ -74,6 +74,10 @@ def test_definition_verifier_prompt_is_independent_and_definition_only():
     assert "candidate_rank" not in prompt
     assert "不得因第一阶段已选中而倾向于保留" in prompt
     assert "只看definition和distinctions" in prompt
+    assert "EXPLICIT_SUBCASE" in prompt
+    assert "UNLISTED_SIBLING" in prompt
+    assert "定义明确列出的一个子项" in prompt
+    assert "未在定义中出现的同类方法" in prompt
 
 
 def test_validate_definition_verifier_requires_every_code_once():
@@ -83,6 +87,7 @@ def test_validate_definition_verifier_requires_every_code_once():
                 {
                     "code": "V02",
                     "match": False,
+                    "coverage_relation": "DIFFERENT_TASK",
                     "question_target": "当前任务二",
                     "definition_target": "定义任务二",
                     "reason": "任务不同",
@@ -90,6 +95,7 @@ def test_validate_definition_verifier_requires_every_code_once():
                 {
                     "code": "V01",
                     "match": True,
+                    "coverage_relation": "EXPLICIT_SUBCASE",
                     "question_target": "当前任务一",
                     "definition_target": "定义任务一",
                     "reason": "完全一致",
@@ -101,6 +107,7 @@ def test_validate_definition_verifier_requires_every_code_once():
 
     assert [item["code"] for item in result] == ["V01", "V02"]
     assert result[0]["match"] is True
+    assert result[0]["coverage_relation"] == "EXPLICIT_SUBCASE"
 
 
 def test_run_definition_verifier_filters_rejected_label(tmp_path: Path):
@@ -125,6 +132,7 @@ def test_run_definition_verifier_filters_rejected_label(tmp_path: Path):
                     {
                         "code": code_by_label["L1"],
                         "match": True,
+                        "coverage_relation": "EXPLICIT_SUBCASE",
                         "question_target": "当前任务一",
                         "definition_target": "定义任务一",
                         "reason": "完全一致",
@@ -132,6 +140,7 @@ def test_run_definition_verifier_filters_rejected_label(tmp_path: Path):
                     {
                         "code": code_by_label["L2"],
                         "match": False,
+                        "coverage_relation": "UNLISTED_SIBLING",
                         "question_target": "当前任务二",
                         "definition_target": "定义任务二",
                         "reason": "仅共享背景",
