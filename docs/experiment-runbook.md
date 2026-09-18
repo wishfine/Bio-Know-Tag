@@ -1572,7 +1572,9 @@ printf 'V91B_LEGACY_RUN=%s PID=%s\n' "$V91B_LEGACY_RUN" "$PID"
 
 ### 25.1 独立Definition Judge
 
-`definition-verifier-v1.1-explicit-subcase`是V9.1b之后的独立二次复核。它只接收当前题和第一阶段选中的Label，但不接收第一阶段reason、`core_concepts`、召回来源、排名或分数。它只用`definition + distinctions`对每个Label独立输出T/F，用于减少第一阶段“先选中、再为自己找理由”的自我合理化。V1.1显式区分定义已列出的合理子项`EXPLICIT_SUBCASE`和定义未列出的相邻方法`UNLISTED_SIBLING`，避免把“水平结构”这类正确子项误删，同时拒绝仅共享“调查/计数”上位词的方法。
+> **废弃，不接入正式流程。** `definition-verifier-v1.1-explicit-subcase`仅保留代码和运行记录供实验复现。
+
+在300题上，V9.1b第一阶段共选中396个Label，Definition Judge仅保留70个（17.7%）、拒绝326个（82.3%），206/259道原本有Label的题被全部删空，最终可训练题从约247道降到52道。其将大量正常的知识应用题（演替类型判断、S形增长K值、呼吸方式判断、PCR引物选择等）误判为`UNLISTED_SIBLING`，且仍未修复河流生态修复题。因此正式方案回到V9.1b单阶段精判，允许少量漏标/空标，只对人工已确认错标使用可追溯的审计排除。
 
 为了做Prompt消融时观察模型原始选择，第一阶段可传`--no-audited-exclusions`关闭人工审计排除；正式物化时不传该参数。
 

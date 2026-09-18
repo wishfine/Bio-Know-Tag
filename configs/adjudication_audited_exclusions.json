@@ -6,6 +6,12 @@
       "label_id": "2276104215104606208",
       "action": "remove_label_and_exclude_training",
       "reason": "人工审计确认：本题记名计算法用于群落丰富度统计，不属于种群密度调查。"
+    },
+    {
+      "question_id": "2326198965676548098",
+      "label_id": "2276104598614986752",
+      "action": "remove_label_and_exclude_training",
+      "reason": "人工审计确认：当前小题考查脲酶活性测定和固定化方法，不直接考查以尿素为唯一氮源的选择培养或鉴别。"
     }
   ]
 }
