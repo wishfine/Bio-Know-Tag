@@ -2092,3 +2092,57 @@ du -sh "$TEACHER_REVIEW_RUN"
 ```
 
 按当前正式数据，预期两个文件数分别是135和77。长尾Label若False或True可用题少于10道，导出实际可用数量，不重复题号补齐10道。
+
+## 31. 两组10万题的Label风险分层审核抽样
+
+该步骤不逐题审核10万条结果，而是把历史正样本覆盖、校正后的硬负样本边界风险和两组10万题实际预测行为合并到Label级审核包。两组必须使用完全相同的`pilot_units.jsonl`：
+
+- 对照组：Hybrid Top25，不追加旧`knw_ids`；
+- 实验组：Hybrid Top25，再追加当前458体系内旧`knw_ids`。
+
+审核优先级为：旧ID组独有选择、纯Top25独有选择、重复题组内不一致、两组Label集合变化、候选尾部/上下文风险、两组共同选择。历史正负样本仅作为风险先验，不作为10万题的新金标。
+
+默认自适应预算：高风险Label 20条、中风险10条、稳定Label 5条；若某Label在两组预测并集中不足30题，则全部导出。高风险包括旧135中的明显异常/长尾以及校正边界实验中的`C/D/E/U_LONG_TAIL`；稳定必须同时满足正样本稳定和`A_STABLE_CANDIDATE`。
+
+等两个10万题任务均完成后运行：
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+
+BASE_RUN='/local_data/zhangyonglin/Bio-Know-Tag/runtime/20260918-095957-v91b-100k'
+TOP25_ONLY_RUN="$(cat runtime/LATEST_V91B_100K_TOP25_NO_LEGACY_RUN)"
+POSITIVE_ANALYSIS_RUN="$(cat runtime/LATEST_STANDALONE_POSITIVE_ANALYSIS_RUN)"
+CORRECTED_RUN="$(cat runtime/LATEST_CORRECTED_BOUNDARY_RUN)"
+
+REVIEW_SAMPLE_RUN="runtime/$(date +%Y%m%d-%H%M%S)-adjudication-100k-label-review"
+mkdir -p "$REVIEW_SAMPLE_RUN"
+
+PYTHONPATH=src python scripts/build_adjudication_review_sample.py \
+  --units "$BASE_RUN/sample/pilot_units.jsonl" \
+  --top25-predictions "$TOP25_ONLY_RUN/predictions.jsonl" \
+  --legacy-predictions "$BASE_RUN/adjudication/predictions.jsonl" \
+  --labels configs/labels.jsonl \
+  --positive-per-label "$POSITIVE_ANALYSIS_RUN/per_label.jsonl" \
+  --boundary-assessments "$CORRECTED_RUN/label_assessments.jsonl" \
+  --strategies configs/label_strategies.review2.jsonl \
+  --run-dir "$REVIEW_SAMPLE_RUN" \
+  --high-count 20 \
+  --medium-count 10 \
+  --stable-count 5 \
+  --seed adjudication-review-v1
+
+printf '%s\n' "$REVIEW_SAMPLE_RUN" > runtime/LATEST_ADJUDICATION_REVIEW_SAMPLE_RUN
+python -m json.tool "$REVIEW_SAMPLE_RUN/report.json"
+wc -l "$REVIEW_SAMPLE_RUN/per_label.jsonl" \
+  "$REVIEW_SAMPLE_RUN/review_tasks.jsonl"
+find "$REVIEW_SAMPLE_RUN/labels" -type f -name '*.json' | wc -l
+```
+
+产物：
+
+- `report.json`：题量、Label风险层分布、最终审核任务量和输入哈希；
+- `per_label.jsonl`：458个Label的历史先验、两组生产选择量、差异量和建议审核数；
+- `review_tasks.jsonl`：汇总后的题目—Label审核任务；
+- `labels/<label_id>.json`：每个Label独立文件，包含统计与代表题全文。
+
+审核结论建议使用`FREEZE/TOP25_ONLY/LEGACY_HELPFUL/TIGHTEN_BOUNDARY/PROMPT_RISK/TAXONOMY_HOLD/LONG_TAIL_REVIEW/INSUFFICIENT_EVIDENCE`，不要仅根据单一比例自动修改老师释义。

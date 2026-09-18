@@ -49,3 +49,9 @@ Bio-Know-Tag Pilot实验记录
 - v8.1 fixes persistent schema failures observed on port 9204: ordinary unselected candidates must not be listed as risky; excess risk codes are capped, rejected/selected overlap is resolved in favor of rejection, and any normalization conflict filters the whole row from training. The run uses a 256-token response ceiling.
 - v8.2 is a single-variable order ablation after v8.1 over-rejected: JSON now generates `selected`, `rejected_risky`, `context_insufficient`, then `need_expand_recall`; all rules, Label fields, normalization, and filtering remain unchanged.
 - v8.2 recovered usable rows to 239 but still emitted explicit risk candidates on 265/299 questions and retained known false positives. v8.3 removes the risk-output field, its normalization, and conflict filtering while keeping the five hard gates, `common_assessments`, and internal adversarial reflection.
+
+2026-09-18 paired 100k Label review sampling
+- Added deterministic Label-level review sampling for the paired Top25 and Top25+legacy 100k adjudication runs.
+- Historical positive coverage and corrected hard-negative screens set HIGH/MEDIUM/STABLE review budgets; they remain weak-supervision risk priors rather than gold labels.
+- Sampling prioritizes legacy-only selections, Top25-only selections, duplicate-group inconsistency, changed output sets, tail ranks, and context risk. Labels with fewer than 30 selected questions are exported in full.
+- Outputs include a global task JSONL, a 458-row Label index, one JSON package per Label, input hashes, and production delta counts.
