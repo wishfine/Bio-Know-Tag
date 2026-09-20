@@ -270,15 +270,16 @@ def build_adjudication_review_sample(
         if strategies_path is not None
         else {}
     )
+    units = {str(row["question_id"]): row for row in _read_jsonl(units_path)}
     image_context = (
         {
-            str(row["question_id"]): row
+            question_id: row
             for row in _read_jsonl(image_context_path)
+            if (question_id := str(row["question_id"])) in units
         }
         if image_context_path is not None
         else {}
     )
-    units = {str(row["question_id"]): row for row in _read_jsonl(units_path)}
     top25 = {
         str(row["question_id"]): row for row in _read_jsonl(top25_predictions_path)
     }
