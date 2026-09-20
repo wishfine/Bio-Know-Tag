@@ -93,6 +93,9 @@ def test_builds_changed_only_standalone_review(tmp_path: Path) -> None:
     assert "https://example.com/stem.png" in content
     assert "这个文字不应嵌入HTML" not in content
     assert "50 QUESTIONS / PAGE" in content
+    assert ".images{display:grid;grid-template-columns:minmax(0,1fr)" in content
+    assert ".compare{display:grid;grid-template-columns:minmax(0,1fr)" in content
+    assert "width:100%;height:auto;max-height:none" in content
     rendered = [json.loads(line) for line in rows.read_text(encoding="utf-8").splitlines()]
     assert rendered[0]["top25_labels"][0]["label_name"] == "标签甲"
     assert rendered[0]["legacy_labels"][0]["label_name"] == "标签乙"
