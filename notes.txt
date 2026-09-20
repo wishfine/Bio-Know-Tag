@@ -61,3 +61,4 @@ Bio-Know-Tag Pilot实验记录
 - Candidate adjudication CLI now supports mutually exclusive `--enable-thinking` and `--disable-thinking` flags.
 - Explicit thinking configuration is sent through OpenAI-compatible `chat_template_kwargs` and recorded in new run manifests, while default runs retain backward-compatible manifests for DS resume.
 - Local Qwen experiments use a separate vLLM port, service directory, and adjudication result root from all DeepSeek evidence.
+- Added paired live-evidence snapshot materialization so an in-progress Top25/Top25+legacy run can be risk-sampled on their common successful question IDs without stopping either process.
