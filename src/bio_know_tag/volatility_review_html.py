@@ -129,11 +129,6 @@ def _build_review_row(
         "selection_jaccard": comparison.get("selection_jaccard"),
         "base_candidate_count": comparison.get("base_candidate_count"),
         "augmented_candidate_count": comparison.get("augmented_candidate_count"),
-        "parent_stem": str(unit.get("parent_stem") or ""),
-        "stem": str(unit.get("stem") or ""),
-        "options": str(unit.get("options") or ""),
-        "answer_text": str(unit.get("answer_text") or ""),
-        "analysis": str(unit.get("analysis") or ""),
         "flags": unit.get("flags") or {},
         "stem_image_url": str(images.get("stem_image_url") or ""),
         "analysis_image_url": str(images.get("analysis_image_url") or ""),
@@ -223,7 +218,10 @@ def build_volatility_review_html(
     catalog_payload = json.dumps(label_catalog, ensure_ascii=False).replace(
         "</", "<\\/"
     )
-    html = HTML_TEMPLATE.replace("__REVIEW_DATA__", payload).replace(
+    template_path = Path(__file__).with_name("volatility_review_batch_template.html")
+    html = template_path.read_text(encoding="utf-8").replace(
+        "__REVIEW_DATA__", payload
+    ).replace(
         "__LABEL_CATALOG__", catalog_payload
     )
     output_path = Path(output_html_path)

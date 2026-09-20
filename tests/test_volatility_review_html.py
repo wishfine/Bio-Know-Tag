@@ -53,7 +53,7 @@ def test_builds_changed_only_standalone_review(tmp_path: Path) -> None:
                 "parent_id": "p1",
                 "unit_type": "sub_question",
                 "parent_stem": "父题",
-                "stem": "题干</script>",
+                "stem": "这个文字不应嵌入HTML</script>",
                 "options": "A.甲",
                 "answer_text": "A",
                 "analysis": "解析",
@@ -91,8 +91,8 @@ def test_builds_changed_only_standalone_review(tmp_path: Path) -> None:
     content = html.read_text(encoding="utf-8")
     assert "高中生物 Label 波动复核台" in content
     assert "https://example.com/stem.png" in content
-    assert "题干<\\/script>" in content
+    assert "这个文字不应嵌入HTML" not in content
+    assert "50 QUESTIONS / PAGE" in content
     rendered = [json.loads(line) for line in rows.read_text(encoding="utf-8").splitlines()]
     assert rendered[0]["top25_labels"][0]["label_name"] == "标签甲"
     assert rendered[0]["legacy_labels"][0]["label_name"] == "标签乙"
-
