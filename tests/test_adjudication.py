@@ -181,6 +181,7 @@ def test_run_adjudication_materializes_audited_exclusion_and_filters_training(
         Client(),
         model="fake-model",
         audited_exclusions_path=rules_path,
+        enable_thinking=False,
     )
 
     prediction = json.loads((output / "predictions.jsonl").read_text())
@@ -191,6 +192,8 @@ def test_run_adjudication_materializes_audited_exclusion_and_filters_training(
     assert report["audited_exclusion_questions"] == 1
     assert report["audited_excluded_labels"] == 1
     assert report["training_filter_reasons"] == {"audited_exclusion": 1}
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():

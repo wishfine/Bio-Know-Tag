@@ -56,3 +56,8 @@ Bio-Know-Tag Pilot实验记录
 - Sampling prioritizes legacy-only selections, Top25-only selections, duplicate-group inconsistency, changed output sets, tail ranks, and context risk. Labels with fewer than 30 selected questions are exported in full.
 - Outputs include a global task JSONL, a 458-row Label index, one JSON package per Label, input hashes, and production delta counts.
 - Review examples optionally join the image-context sidecar so teachers receive stem, analysis, and parent image URLs without sending images to the text-only adjudicator.
+
+2026-09-20 local Qwen vLLM adjudication
+- Candidate adjudication CLI now supports mutually exclusive `--enable-thinking` and `--disable-thinking` flags.
+- Explicit thinking configuration is sent through OpenAI-compatible `chat_template_kwargs` and recorded in new run manifests, while default runs retain backward-compatible manifests for DS resume.
+- Local Qwen experiments use a separate vLLM port, service directory, and adjudication result root from all DeepSeek evidence.

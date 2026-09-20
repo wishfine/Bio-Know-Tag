@@ -2148,3 +2148,9 @@ find "$REVIEW_SAMPLE_RUN/labels" -type f -name '*.json' | wc -l
 - `labels/<label_id>.json`：每个Label独立文件，包含统计与代表题全文。
 
 审核结论建议使用`FREEZE/TOP25_ONLY/LEGACY_HELPFUL/TIGHTEN_BOUNDARY/PROMPT_RISK/TAXONOMY_HOLD/LONG_TAIL_REVIEW/INSUFFICIENT_EVIDENCE`，不要仅根据单一比例自动修改老师释义。
+
+## 32. 本地Qwen双卡vLLM精判对照
+
+Qwen系列可能默认进入thinking模式。`run_candidate_adjudication.py`支持`--disable-thinking`，通过OpenAI兼容请求的`chat_template_kwargs.enable_thinking=false`关闭思考，并在新运行的`run_manifest.json`记录该设置。未传开关时不改变旧DS运行清单，可继续断点续跑。
+
+模型服务与结果必须使用独立目录和端口，不复用DS的`adjudication/`目录。推荐两张80GB卡采用TP=2、BF16和至少16384上下文；先完成API Smoke与100题精判，再启动10万题。

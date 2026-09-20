@@ -318,6 +318,7 @@ def run_adjudication(
     max_tokens: int = 1024,
     workers: int = 1,
     audited_exclusions_path: str | Path | None = None,
+    enable_thinking: bool | None = None,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -384,6 +385,10 @@ def run_adjudication(
         if audited_exclusions_path is not None
         else None,
     }
+    if enable_thinking is not None:
+        manifest["chat_template_kwargs"] = {
+            "enable_thinking": enable_thinking
+        }
     _ensure_run_manifest(output_dir / "run_manifest.json", manifest)
     completed, evidence_rows = _latest_success(
         evidence_path, prompt_version=prompt_version

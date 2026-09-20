@@ -43,6 +43,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=1)
+    thinking = parser.add_mutually_exclusive_group()
+    thinking.add_argument(
+        "--enable-thinking",
+        dest="enable_thinking",
+        action="store_true",
+        help="request thinking mode through chat_template_kwargs",
+    )
+    thinking.add_argument(
+        "--disable-thinking",
+        dest="enable_thinking",
+        action="store_false",
+        help="disable thinking mode through chat_template_kwargs",
+    )
+    parser.set_defaults(enable_thinking=None)
     return parser.parse_args()
 
 
@@ -69,6 +83,7 @@ def main() -> int:
         retries=args.retries,
         retry_delay=args.retry_delay,
         request_interval=args.request_interval,
+        enable_thinking=args.enable_thinking,
     )
     report = run_adjudication(
         args.units,
@@ -83,6 +98,7 @@ def main() -> int:
         audited_exclusions_path=(
             None if args.no_audited_exclusions else args.audited_exclusions
         ),
+        enable_thinking=args.enable_thinking,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1
