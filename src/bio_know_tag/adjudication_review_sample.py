@@ -249,6 +249,7 @@ def build_adjudication_review_sample(
     output_dir: str | Path,
     *,
     strategies_path: str | Path | None = None,
+    image_context_path: str | Path | None = None,
     high_count: int = 20,
     medium_count: int = 10,
     stable_count: int = 5,
@@ -267,6 +268,14 @@ def build_adjudication_review_sample(
     strategies = (
         {str(row["label_id"]): row for row in _read_jsonl(strategies_path)}
         if strategies_path is not None
+        else {}
+    )
+    image_context = (
+        {
+            str(row["question_id"]): row
+            for row in _read_jsonl(image_context_path)
+        }
+        if image_context_path is not None
         else {}
     )
     units = {str(row["question_id"]): row for row in _read_jsonl(units_path)}
@@ -318,6 +327,7 @@ def build_adjudication_review_sample(
             top_prediction = top25[question_id]
             legacy_prediction = legacy[question_id]
             flags = unit.get("flags") or {}
+            images = image_context.get(question_id, {})
             examples_by_label[label_id].append(
                 {
                     "label_id": label_id,
@@ -331,6 +341,22 @@ def build_adjudication_review_sample(
                     "answer_text": unit.get("answer_text", ""),
                     "analysis": unit.get("analysis", ""),
                     "flags": flags,
+                    "stem_image_url": str(images.get("stem_image_url") or ""),
+                    "analysis_image_url": str(
+                        images.get("analysis_image_url") or ""
+                    ),
+                    "parent_stem_image_url": str(
+                        images.get("parent_stem_image_url") or ""
+                    ),
+                    "parent_analysis_image_url": str(
+                        images.get("parent_analysis_image_url") or ""
+                    ),
+                    "image_content_status": str(
+                        images.get("content_status") or ""
+                    ),
+                    "image_needs_content_review": bool(
+                        images.get("needs_content_review")
+                    ),
                     "selection_status": status,
                     "label_set_changed": label_set_changed,
                     "duplicate_inconsistency": (question_id, label_id)
@@ -424,6 +450,11 @@ def build_adjudication_review_sample(
             "boundary_assessments": _file_sha256(boundary_assessments_path),
         },
     }
+    if image_context_path is not None:
+        report["input_sha256"]["image_context"] = _file_sha256(
+            image_context_path
+        )
+        report["image_context_path"] = str(image_context_path)
     _write_json_atomic(output / "report.json", report)
     print(
         "review sample tests whether historical risk and legacy candidate augmentation "

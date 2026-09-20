@@ -121,6 +121,26 @@ def test_build_review_sample_prioritizes_deltas_and_duplicate_inconsistency(
         {"label_id": "L2", "final_screen": "A_STABLE_CANDIDATE"},
         {"label_id": "L3", "final_screen": "B_MINOR_BOUNDARY_REVIEW"},
     ]
+    image_context = [
+        {
+            "question_id": question_id,
+            "stem_image_url": f"https://example.test/{question_id}-stem.png",
+            "analysis_image_url": f"https://example.test/{question_id}-analysis.png",
+            "parent_stem_image_url": "",
+            "parent_analysis_image_url": "",
+            "content_status": "text_with_image_context",
+            "eligible_for_text_labeling": True,
+            "needs_content_review": False,
+        }
+        for question_id, _ in [
+            ("q1", "h1"),
+            ("q2", "h2"),
+            ("q3", "h3"),
+            ("q4", "same"),
+            ("q5", "same"),
+            ("q6", "h6"),
+        ]
+    ]
     paths = {}
     for name, rows in {
         "labels": labels,
@@ -129,6 +149,7 @@ def test_build_review_sample_prioritizes_deltas_and_duplicate_inconsistency(
         "legacy": legacy,
         "positive": positive,
         "boundaries": boundaries,
+        "image_context": image_context,
     }.items():
         paths[name] = tmp_path / f"{name}.jsonl"
         _write_jsonl(paths[name], rows)
@@ -142,6 +163,7 @@ def test_build_review_sample_prioritizes_deltas_and_duplicate_inconsistency(
         paths["positive"],
         paths["boundaries"],
         output,
+        image_context_path=paths["image_context"],
         high_count=3,
         medium_count=2,
         stable_count=2,
@@ -166,4 +188,6 @@ def test_build_review_sample_prioritizes_deltas_and_duplicate_inconsistency(
     }
     l2_tasks = [row for row in tasks if row["label_id"] == "L2"]
     assert any(row["duplicate_inconsistency"] for row in l2_tasks)
+    assert l1_tasks[0]["stem_image_url"].startswith("https://example.test/")
+    assert "image_context" in report["input_sha256"]
     assert (output / "labels" / "L1.json").is_file()

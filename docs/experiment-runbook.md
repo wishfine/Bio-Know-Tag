@@ -2064,12 +2064,14 @@ HARD_NEG_SAMPLE_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_SAMPLE_RUN)"
 HARD_NEG_DS_RUN="$(cat runtime/LATEST_HARD_NEGATIVE_DS_RUN)"
 COLABEL_V2_RUN="$(cat runtime/LATEST_COLABEL_V2_RUN)"
 CORRECTED_RUN="$(cat runtime/LATEST_CORRECTED_BOUNDARY_RUN)"
+IMAGE_AUDIT_RUN="$(cat runtime/LATEST_IMAGE_CONTEXT_AUDIT_RUN)"
 
 TEACHER_REVIEW_RUN="/local_data/zhangyonglin/data/bio-know-tag/teacher-review-$(date +%Y%m%d-%H%M%S)"
 
 PYTHONPATH=src python scripts/export_teacher_review_packages.py \
   --labels configs/labels.jsonl \
   --strategies configs/label_strategies.review2.jsonl \
+  --image-context "$IMAGE_AUDIT_RUN/image_context.jsonl" \
   --positive-tasks "$STANDALONE_SAMPLE_RUN/boundary_samples.jsonl" \
   --positive-results "$STANDALONE_FULL_RUN/results.jsonl" \
   --positive-per-label "$POSITIVE_ANALYSIS_RUN/per_label.jsonl" \

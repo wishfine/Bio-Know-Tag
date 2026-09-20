@@ -22,6 +22,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--positive-per-label", type=Path, required=True)
     parser.add_argument("--boundary-assessments", type=Path, required=True)
     parser.add_argument("--strategies", type=Path)
+    parser.add_argument("--image-context", type=Path)
     parser.add_argument("--run-dir", type=Path)
     parser.add_argument("--high-count", type=int, default=20)
     parser.add_argument("--medium-count", type=int, default=10)
@@ -44,6 +45,7 @@ def main() -> int:
         args.boundary_assessments,
         run_dir,
         strategies_path=args.strategies,
+        image_context_path=args.image_context,
         high_count=args.high_count,
         medium_count=args.medium_count,
         stable_count=args.stable_count,
