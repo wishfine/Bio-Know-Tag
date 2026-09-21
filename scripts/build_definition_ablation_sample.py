@@ -8,7 +8,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from bio_know_tag.definition_ablation import build_definition_ablation_sample
+from bio_know_tag.definition_ablation import (
+    build_definition_ablation_sample,
+    load_labels,
+)
 
 
 def sha256(path: Path) -> str:
@@ -55,6 +58,7 @@ def main() -> int:
 
     paired = []
     for row in selected:
+        question_fields = row["question"]
         base = {
             "pair_id": row["pair_id"],
             "question_id": row["question_id"],
@@ -66,10 +70,11 @@ def main() -> int:
             "stratum": row["stratum"],
             "requested_count": row["requested_count"],
             "sample_source": row["sample_source"],
-            "question": row["question"],
+            "question": question_fields,
             "historical_result": row["historical_result"],
             "image_context_missing": row["image_context_missing"],
         }
+        base.update(question_fields)
         paired.append(
             {
                 **base,
@@ -100,6 +105,26 @@ def main() -> int:
     write_jsonl(
         args.run_dir / "name_plus_definition_tasks.jsonl",
         [row for row in paired if row["condition"] == "name_plus_definition"],
+    )
+    labels = load_labels(args.labels)
+    write_jsonl(
+        args.run_dir / "name_only_labels.jsonl",
+        [
+            {
+                "label_id": label_id,
+                "label_name": str(label.get("label_name") or ""),
+                "label_path": "",
+                "definition": "",
+                "core_concepts": "",
+                "common_assessments": "",
+                "distinctions": "",
+            }
+            for label_id, label in sorted(labels.items())
+        ],
+    )
+    write_jsonl(
+        args.run_dir / "name_plus_definition_labels.jsonl",
+        [labels[label_id] for label_id in sorted(labels)],
     )
     (args.run_dir / "per_label.jsonl").write_text(
         "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in report.pop("per_label")),
