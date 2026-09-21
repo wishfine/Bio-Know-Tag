@@ -352,7 +352,14 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         question_id = str(row["question_id"])
         if question_id not in units:
             raise ValueError(f"question {question_id} missing from units")
-        candidates = top25 if group_by_question[question_id] == "A_same_candidate_set" else legacy
+        if args.candidate_mode == "legacy":
+            candidates = legacy
+        else:
+            candidates = (
+                top25
+                if group_by_question[question_id] == "A_same_candidate_set"
+                else legacy
+            )
         if question_id not in candidates:
             raise ValueError(f"question {question_id} missing from candidate file")
         prompt, code_map = build_task_payload(units[question_id], candidates[question_id], labels)
@@ -373,6 +380,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "model": args.model,
         "input_count": len(tasks),
         "sample_seed": args.sample_seed,
+        "candidate_mode": args.candidate_mode,
         "group_files": [str(path) for path in args.unstable_group],
         "conditions": [condition.__dict__ for condition in conditions],
         "input_sha256": {
@@ -513,6 +521,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model", default=os.getenv("MODEL", "DeepSeek-V4-Flash"))
     parser.add_argument("--limit", type=int, default=5391)
     parser.add_argument("--sample-seed", type=int, default=20260921)
+    parser.add_argument(
+        "--candidate-mode",
+        choices=("replay", "legacy"),
+        default="replay",
+        help="replay prior A/B/C candidate inputs, or use Top25+legacy for every task",
+    )
     parser.add_argument("--condition", action="append", help="name:temperature:n:workers[:seed]")
     parser.add_argument("--timeout", type=float, default=300)
     parser.add_argument("--retries", type=int, default=3)
