@@ -62,6 +62,27 @@ PYTHONPATH=src python scripts/run_ds_stability_experiment.py \
 - `conditions/<condition>/report.json`：单组成功率、解析错误、n 路 choice 内部一致率。
 - `report.json`：不同条件之间的 exact agreement、输出差异率、Label 集合 Jaccard，并按此前 A/B/C 组拆分。
 
+## 完成后的详细分析
+
+四个条件都完成后，用第一组条件作为默认基线，生成逐题的“多选/少选/同数替换”审计：
+
+```bash
+PYTHONPATH=src python scripts/analyze_ds_stability.py \
+  --run-dir runtime/20260921-183635-ds-stability-5391-all-legacy-w20 \
+  --labels configs/labels.jsonl \
+  --baseline temp0-workers20 \
+  --require-complete
+```
+
+输出在 `<run-dir>/detailed-analysis/`：
+
+- `summary.md`：完成状态、相对基线的多选/少选/替换统计，以及 A/B/C 扰动组拆分；
+- `report.json`：机器可读汇总；
+- `per_question.jsonl`：每题基线和条件的 Label 集合、增加/移除 Label、数量变化、Jaccard，以及 `n=4` 时各 choice 的选中数；
+- `per_label.jsonl`：每个 Label 在各条件中相对基线被新增、被移除和净变化的次数。
+
+其中“多选/少选”比较的是最终严格多数票的 Label 数量；如果数量相同但 Label 集合发生替换，单列为“同数替换”。`--require-complete` 会在任一条件尚未完成时拒绝生成最终分析；不加该参数可以先看中途快照，但共同题数和比例不是最终结果。
+
 解释时要区分：
 
 1. 单线程温度 0 的重复差异，更接近模型/服务本身非确定性；
