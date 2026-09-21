@@ -17,6 +17,7 @@ from bio_know_tag.reranker import (
     RERANKER_INPUT_VERSION,
     RERANKER_INSTRUCTION,
     build_reranker_pairs,
+    normalize_chat_template_token_ids,
 )
 from bio_know_tag.retrieval import format_label_path
 
@@ -245,11 +246,13 @@ def main() -> int:
                     ]
                     for pair in batch
                 ]
-                token_ids = tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=True,
-                    add_generation_prompt=False,
-                    enable_thinking=False,
+                token_ids = normalize_chat_template_token_ids(
+                    tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=True,
+                        add_generation_prompt=False,
+                        enable_thinking=False,
+                    )
                 )
                 prompts = []
                 prompt_lengths = []

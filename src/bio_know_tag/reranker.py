@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from bio_know_tag.adjudication import build_adjudication_inputs
@@ -10,6 +11,23 @@ from bio_know_tag.adjudication import build_adjudication_inputs
 
 RERANKER_INPUT_VERSION = "qwen3-reranker-ds-aligned-v1"
 RERANKER_INSTRUCTION = """Determine whether the candidate Label is directly assessed by the current high-school biology question. False positives are substantially more costly than false negatives. The Label scope is jointly defined by label_name, label_path, definition, and distinctions; distinctions are hard exclusion boundaries, while core_concepts may explain but must not expand that scope. Reject a Label that is only related by terminology, chapter, hierarchy, background, shared mechanism, or a commonly co-occurring concept. Reject object, task, dimension, biological level, experimental purpose, method, or application mismatches. Judge only the current question; parent_stem may resolve an explicit reference but must not create an independent assessed concept. A wrong option supports a Label only when evaluating that option genuinely requires the Label. Each Label must independently support a real key judgment. It is valid for no candidate Label to match."""
+
+
+def normalize_chat_template_token_ids(value: Any) -> list[list[int]]:
+    """Normalize Transformers 4/5 chat-template batch return values."""
+    if isinstance(value, Mapping):
+        if "input_ids" not in value:
+            raise ValueError("chat template mapping is missing input_ids")
+        value = value["input_ids"]
+    if hasattr(value, "tolist"):
+        value = value.tolist()
+    if not isinstance(value, (list, tuple)):
+        raise TypeError("chat template output must contain token ID sequences")
+    if not value:
+        return []
+    if isinstance(value[0], int):
+        return [list(value)]
+    return [list(token_ids) for token_ids in value]
 
 
 class TransformerCrossEncoderReranker:

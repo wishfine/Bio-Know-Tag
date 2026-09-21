@@ -5,6 +5,7 @@ from bio_know_tag.reranker import (
     RERANKER_INSTRUCTION,
     TransformerCrossEncoderReranker,
     build_reranker_pairs,
+    normalize_chat_template_token_ids,
 )
 
 
@@ -138,3 +139,13 @@ def test_reranker_instruction_keeps_precision_first_empty_output_policy():
     assert "no candidate" in RERANKER_INSTRUCTION.lower()
     assert "parent" in RERANKER_INSTRUCTION.lower()
     assert "distinctions" in RERANKER_INSTRUCTION
+
+
+def test_normalize_chat_template_token_ids_accepts_transformers_5_mapping():
+    value = {"input_ids": [[1, 2, 3], [4, 5]]}
+
+    assert normalize_chat_template_token_ids(value) == [[1, 2, 3], [4, 5]]
+
+
+def test_normalize_chat_template_token_ids_keeps_legacy_list_output():
+    assert normalize_chat_template_token_ids([[1, 2], [3]]) == [[1, 2], [3]]
