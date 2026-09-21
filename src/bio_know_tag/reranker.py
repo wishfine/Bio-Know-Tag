@@ -1,8 +1,15 @@
-"""Lazy Transformers cross-encoder used to rerank retrieval candidates."""
+"""Rerank retrieval candidates and build DS-aligned Qwen3 inputs."""
 
 from __future__ import annotations
 
-from typing import Iterable
+import json
+from typing import Any, Iterable
+
+from bio_know_tag.adjudication import build_adjudication_inputs
+
+
+RERANKER_INPUT_VERSION = "qwen3-reranker-ds-aligned-v1"
+RERANKER_INSTRUCTION = """Determine whether the candidate Label is directly assessed by the current high-school biology question. False positives are substantially more costly than false negatives. The Label scope is jointly defined by label_name, label_path, definition, and distinctions; distinctions are hard exclusion boundaries, while core_concepts may explain but must not expand that scope. Reject a Label that is only related by terminology, chapter, hierarchy, background, shared mechanism, or a commonly co-occurring concept. Reject object, task, dimension, biological level, experimental purpose, method, or application mismatches. Judge only the current question; parent_stem may resolve an explicit reference but must not create an independent assessed concept. A wrong option supports a Label only when evaluating that option genuinely requires the Label. Each Label must independently support a real key judgment. It is valid for no candidate Label to match."""
 
 
 class TransformerCrossEncoderReranker:
@@ -87,3 +94,34 @@ class TransformerCrossEncoderReranker:
                 logits = self.model(**inputs).logits.reshape(-1)
             scores.extend(float(value) for value in logits.float().cpu().tolist())
         return scores
+
+
+def build_reranker_pairs(
+    unit: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    labels_by_id: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Create one query-document pair per candidate from shared DS payloads."""
+    question, candidate_cards, code_map = build_adjudication_inputs(
+        unit,
+        candidates,
+        labels_by_id,
+    )
+    query = json.dumps(question, ensure_ascii=False, separators=(",", ":"))
+    pairs = []
+    for card in candidate_cards:
+        code = str(card["code"])
+        pairs.append(
+            {
+                "question_id": str(unit.get("question_id") or ""),
+                "code": code,
+                "label_id": code_map[code],
+                "query": query,
+                "document": json.dumps(
+                    card,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+        )
+    return pairs

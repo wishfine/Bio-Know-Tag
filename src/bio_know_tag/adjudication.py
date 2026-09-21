@@ -113,11 +113,12 @@ def apply_audited_exclusions(
     return kept, removed, exclude_training
 
 
-def build_adjudication_prompt(
+def build_adjudication_inputs(
     unit: dict[str, Any],
     candidates: list[dict[str, Any]],
     labels_by_id: dict[str, dict[str, Any]],
-) -> tuple[str, dict[str, str]]:
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, str]]:
+    """Build the exact question and candidate payloads shown to DS."""
     question_id = str(unit.get("question_id") or "")
     shuffled_candidates = sorted(
         candidates,
@@ -159,6 +160,19 @@ def build_adjudication_prompt(
             (unit.get("flags") or {}).get("image_context_missing")
         ),
     }
+    return question, candidate_cards, code_map
+
+
+def build_adjudication_prompt(
+    unit: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    labels_by_id: dict[str, dict[str, Any]],
+) -> tuple[str, dict[str, str]]:
+    question, candidate_cards, code_map = build_adjudication_inputs(
+        unit,
+        candidates,
+        labels_by_id,
+    )
     prompt = f"""你是严谨的高中生物知识点判标器。本任务高精度优先：错标的代价远高于漏标。可以少选、selected=[]或要求扩召；不得为提高覆盖率加入只是相关、同章节、上下位邻近、共享机制或常见伴随出现的Label。
 
 任务是判断：当前小题是否直接考查候选Label所定义的知识范围，而不是寻找所有相关知识。只输出简短结论，不输出详细思考过程。
