@@ -75,6 +75,25 @@ def build_qwen3_reranker_token_ids(
     return prompts
 
 
+def extract_binary_logprobs(
+    final_logprobs: Mapping[int, Any],
+    *,
+    true_token: int,
+    false_token: int,
+    missing_floor: float = -10.0,
+) -> tuple[float, float]:
+    """Extract yes/no logprobs using Qwen's official missing-token floor."""
+    true_value = final_logprobs.get(true_token)
+    false_value = final_logprobs.get(false_token)
+    true_logprob = (
+        float(true_value.logprob) if true_value is not None else missing_floor
+    )
+    false_logprob = (
+        float(false_value.logprob) if false_value is not None else missing_floor
+    )
+    return true_logprob, false_logprob
+
+
 class TransformerCrossEncoderReranker:
     """Score question/Label pairs with a sequence-classification model."""
 

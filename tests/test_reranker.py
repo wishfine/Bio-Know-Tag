@@ -6,6 +6,7 @@ from bio_know_tag.reranker import (
     TransformerCrossEncoderReranker,
     build_qwen3_reranker_token_ids,
     build_reranker_pairs,
+    extract_binary_logprobs,
     normalize_chat_template_token_ids,
 )
 
@@ -180,3 +181,20 @@ def test_explicit_qwen3_token_format_contains_each_query_and_document():
     assert any('"label_name":"甲"' in text for text in tokenizer.texts)
     assert any('"question_id":"q2"' in text for text in tokenizer.texts)
     assert any('"label_name":"乙"' in text for text in tokenizer.texts)
+
+
+def test_extract_binary_logprobs_uses_official_floor_for_missing_token():
+    class Value:
+        def __init__(self, logprob):
+            self.logprob = logprob
+
+    assert extract_binary_logprobs(
+        {7: Value(-0.2)},
+        true_token=7,
+        false_token=8,
+    ) == (-0.2, -10.0)
+    assert extract_binary_logprobs(
+        {8: Value(-0.3)},
+        true_token=7,
+        false_token=8,
+    ) == (-10.0, -0.3)

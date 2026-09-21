@@ -18,6 +18,7 @@ from bio_know_tag.reranker import (
     RERANKER_INSTRUCTION,
     build_qwen3_reranker_token_ids,
     build_reranker_pairs,
+    extract_binary_logprobs,
 )
 from bio_know_tag.retrieval import format_label_path
 
@@ -241,10 +242,11 @@ def main() -> int:
                     batch, prompt_lengths, outputs, strict=True
                 ):
                     final_logprobs = response.outputs[0].logprobs[-1]
-                    if true_token not in final_logprobs or false_token not in final_logprobs:
-                        raise ValueError("yes/no tokens missing from vLLM logprobs")
-                    true_logprob = float(final_logprobs[true_token].logprob)
-                    false_logprob = float(final_logprobs[false_token].logprob)
+                    true_logprob, false_logprob = extract_binary_logprobs(
+                        final_logprobs,
+                        true_token=true_token,
+                        false_token=false_token,
+                    )
                     record = {
                         "question_id": pair["question_id"],
                         "code": pair["code"],
