@@ -15,7 +15,9 @@ def read(path: Path) -> dict[str, dict]:
         for line in handle:
             if line.strip():
                 row = json.loads(line)
-                rows[str(row["task_id"])] = row
+                key = row.get("task_id") or row.get("pair_id")
+                if key:
+                    rows[str(key)] = row
     return rows
 
 
