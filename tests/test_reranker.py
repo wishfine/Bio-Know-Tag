@@ -4,6 +4,7 @@ from bio_know_tag.adjudication import build_adjudication_inputs
 from bio_know_tag.reranker import (
     RERANKER_INSTRUCTION,
     TransformerCrossEncoderReranker,
+    build_qwen3_reranker_token_ids,
     build_reranker_pairs,
     normalize_chat_template_token_ids,
 )
@@ -149,3 +150,33 @@ def test_normalize_chat_template_token_ids_accepts_transformers_5_mapping():
 
 def test_normalize_chat_template_token_ids_keeps_legacy_list_output():
     assert normalize_chat_template_token_ids([[1, 2], [3]]) == [[1, 2], [3]]
+
+
+def test_explicit_qwen3_token_format_contains_each_query_and_document():
+    class Tokenizer:
+        def __init__(self):
+            self.texts = []
+
+        def encode(self, text, *, add_special_tokens):
+            assert add_special_tokens is False
+            self.texts.append(text)
+            return [ord(character) for character in text]
+
+    tokenizer = Tokenizer()
+    pairs = [
+        {"query": '{"question_id":"q1"}', "document": '{"label_name":"甲"}'},
+        {"query": '{"question_id":"q2"}', "document": '{"label_name":"乙"}'},
+    ]
+
+    prompts = build_qwen3_reranker_token_ids(
+        tokenizer,
+        pairs,
+        max_model_len=4096,
+    )
+
+    assert len(prompts) == 2
+    assert prompts[0] != prompts[1]
+    assert any('"question_id":"q1"' in text for text in tokenizer.texts)
+    assert any('"label_name":"甲"' in text for text in tokenizer.texts)
+    assert any('"question_id":"q2"' in text for text in tokenizer.texts)
+    assert any('"label_name":"乙"' in text for text in tokenizer.texts)

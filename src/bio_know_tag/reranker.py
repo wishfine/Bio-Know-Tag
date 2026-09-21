@@ -9,8 +9,19 @@ from typing import Any, Iterable
 from bio_know_tag.adjudication import build_adjudication_inputs
 
 
-RERANKER_INPUT_VERSION = "qwen3-reranker-ds-aligned-v1"
+RERANKER_INPUT_VERSION = "qwen3-reranker-ds-aligned-v2-explicit-token-format"
 RERANKER_INSTRUCTION = """Determine whether the candidate Label is directly assessed by the current high-school biology question. False positives are substantially more costly than false negatives. The Label scope is jointly defined by label_name, label_path, definition, and distinctions; distinctions are hard exclusion boundaries, while core_concepts may explain but must not expand that scope. Reject a Label that is only related by terminology, chapter, hierarchy, background, shared mechanism, or a commonly co-occurring concept. Reject object, task, dimension, biological level, experimental purpose, method, or application mismatches. Judge only the current question; parent_stem may resolve an explicit reference but must not create an independent assessed concept. A wrong option supports a Label only when evaluating that option genuinely requires the Label. Each Label must independently support a real key judgment. It is valid for no candidate Label to match."""
+QWEN3_RERANKER_PREFIX = """<|im_start|>system
+Judge whether the Document meets the requirements based on the Query and the Instruct provided. Note that the answer can only be \"yes\" or \"no\".<|im_end|>
+<|im_start|>user
+"""
+QWEN3_RERANKER_SUFFIX = """<|im_end|>
+<|im_start|>assistant
+<think>
+
+</think>
+
+"""
 
 
 def normalize_chat_template_token_ids(value: Any) -> list[list[int]]:
@@ -28,6 +39,40 @@ def normalize_chat_template_token_ids(value: Any) -> list[list[int]]:
     if isinstance(value[0], int):
         return [list(value)]
     return [list(token_ids) for token_ids in value]
+
+
+def build_qwen3_reranker_token_ids(
+    tokenizer: Any,
+    pairs: list[dict[str, Any]],
+    *,
+    max_model_len: int,
+) -> list[list[int]]:
+    """Encode pairs with Qwen's official explicit reranker prompt format."""
+    prefix_tokens = tokenizer.encode(
+        QWEN3_RERANKER_PREFIX,
+        add_special_tokens=False,
+    )
+    suffix_tokens = tokenizer.encode(
+        QWEN3_RERANKER_SUFFIX,
+        add_special_tokens=False,
+    )
+    prompts = []
+    for pair in pairs:
+        body = (
+            f"<Instruct>: {RERANKER_INSTRUCTION}\n\n"
+            f"<Query>: {pair['query']}\n\n"
+            f"<Document>: {pair['document']}"
+        )
+        body_tokens = tokenizer.encode(body, add_special_tokens=False)
+        token_ids = prefix_tokens + body_tokens + suffix_tokens
+        if len(token_ids) > max_model_len:
+            raise ValueError(
+                "reranker input would be truncated, violating DS alignment: "
+                f"{pair['question_id']}::{pair['label_id']} has "
+                f"{len(token_ids)} tokens > {max_model_len}"
+            )
+        prompts.append(token_ids)
+    return prompts
 
 
 class TransformerCrossEncoderReranker:

@@ -16,8 +16,8 @@ from pathlib import Path
 from bio_know_tag.reranker import (
     RERANKER_INPUT_VERSION,
     RERANKER_INSTRUCTION,
+    build_qwen3_reranker_token_ids,
     build_reranker_pairs,
-    normalize_chat_template_token_ids,
 )
 from bio_know_tag.retrieval import format_label_path
 
@@ -213,8 +213,6 @@ def main() -> int:
         )
         true_token = tokenizer("yes", add_special_tokens=False).input_ids[0]
         false_token = tokenizer("no", add_special_tokens=False).input_ids[0]
-        suffix = "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
-        suffix_tokens = tokenizer.encode(suffix, add_special_tokens=False)
         sampling = SamplingParams(
             temperature=0,
             max_tokens=1,
@@ -225,47 +223,16 @@ def main() -> int:
         with scores_path.open("a", encoding="utf-8", newline="\n") as output:
             for offset in range(0, len(pending), args.pair_batch_size):
                 batch = pending[offset : offset + args.pair_batch_size]
-                messages = [
-                    [
-                        {
-                            "role": "system",
-                            "content": (
-                                "Judge whether the Document meets the requirements "
-                                "based on the Query and the Instruct provided. Note "
-                                "that the answer can only be \"yes\" or \"no\"."
-                            ),
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"<Instruct>: {RERANKER_INSTRUCTION}\n\n"
-                                f"<Query>: {pair['query']}\n\n"
-                                f"<Document>: {pair['document']}"
-                            ),
-                        },
-                    ]
-                    for pair in batch
-                ]
-                token_ids = normalize_chat_template_token_ids(
-                    tokenizer.apply_chat_template(
-                        messages,
-                        tokenize=True,
-                        add_generation_prompt=False,
-                        enable_thinking=False,
-                    )
+                token_ids = build_qwen3_reranker_token_ids(
+                    tokenizer,
+                    batch,
+                    max_model_len=args.max_model_len,
                 )
                 prompts = []
                 prompt_lengths = []
                 for pair, ids in zip(batch, token_ids, strict=True):
-                    total_length = len(ids) + len(suffix_tokens)
-                    if total_length > args.max_model_len:
-                        raise ValueError(
-                            "reranker input would be truncated, violating DS alignment: "
-                            f"{pair['question_id']}::{pair['label_id']} has "
-                            f"{total_length} tokens > {args.max_model_len}"
-                        )
-                    prompts.append(TokensPrompt(prompt_token_ids=ids + suffix_tokens))
-                    prompt_lengths.append(total_length)
+                    prompts.append(TokensPrompt(prompt_token_ids=ids))
+                    prompt_lengths.append(len(ids))
 
                 batch_started = time.monotonic()
                 outputs = llm.generate(prompts, sampling, use_tqdm=False)
