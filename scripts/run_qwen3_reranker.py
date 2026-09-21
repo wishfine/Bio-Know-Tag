@@ -194,7 +194,7 @@ def main() -> int:
     if pending:
         from transformers import AutoTokenizer
         from vllm import LLM, SamplingParams
-        from vllm.inputs.data import TokensPrompt
+        from vllm.inputs import TokensPrompt
 
         tokenizer = AutoTokenizer.from_pretrained(
             str(args.model_path),
