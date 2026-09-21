@@ -4,6 +4,7 @@ from bio_know_tag.laya_decision import (
     LAYA_NUOL_INSTRUCTION,
     build_laya_state_and_questions,
     laya_answers_to_scores,
+    laya_noul_to_match_scores,
 )
 
 
@@ -69,6 +70,15 @@ def test_laya_answers_to_scores_validates_and_preserves_codes():
         {"C01": "L1", "C02": "L2"},
     )
     assert scores == {"C01": 0.2, "C02": 0.95}
+
+
+def test_laya_noul_scores_are_inverted_for_match_selection():
+    noul_scores = {"C01": 0.03, "C02": 0.95}
+
+    assert laya_noul_to_match_scores(noul_scores) == {
+        "C01": 0.97,
+        "C02": 0.05,
+    }
 
 
 def test_laya_candidate_card_is_json_and_no_reasoning_is_required():

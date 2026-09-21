@@ -8,7 +8,7 @@ from typing import Any
 from bio_know_tag.adjudication import build_adjudication_inputs
 
 
-LAYA_INPUT_VERSION = "laya-multilingual-ds-aligned-noul-v1"
+LAYA_INPUT_VERSION = "laya-multilingual-ds-aligned-noul-v2-match-score"
 
 # This instruction is deliberately conservative. Laya answers one independent
 # binary question per candidate, so the policy must not rely on competition
@@ -73,3 +73,14 @@ def laya_answers_to_scores(
             raise ValueError(f"Laya noul score for {code} is outside [0, 1]")
         scores[code] = score
     return scores
+
+
+def laya_noul_to_match_scores(noul_scores: dict[str, float]) -> dict[str, float]:
+    """Convert Laya's ``noul`` (negative/no) probability to match probability.
+
+    In the Laya/JeV output contract, ``noul`` is the probability of the
+    negative answer.  The playground therefore displays true as approximately
+    ``1 - noul``.  Keeping this conversion explicit prevents callers from
+    treating a high rejection probability as a positive Label match.
+    """
+    return {code: round(1.0 - float(score), 10) for code, score in noul_scores.items()}

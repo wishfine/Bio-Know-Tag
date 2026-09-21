@@ -22,6 +22,7 @@ from bio_know_tag.laya_decision import (
     LAYA_INPUT_VERSION,
     build_laya_state_and_questions,
     laya_answers_to_scores,
+    laya_noul_to_match_scores,
 )
 from bio_know_tag.retrieval import format_label_path
 
@@ -176,8 +177,11 @@ def main() -> int:
                 unit, candidates, labels_by_id
             )
             result = agent.predict(state, questions)
-            scores = laya_answers_to_scores(result.get("answers") or {}, code_map)
-            score_rows += len(scores)
+            noul_scores = laya_answers_to_scores(
+                result.get("answers") or {}, code_map
+            )
+            match_scores = laya_noul_to_match_scores(noul_scores)
+            score_rows += len(noul_scores)
 
             candidate_by_id = {
                 str(candidate["label_id"]): candidate for candidate in candidates
@@ -185,18 +189,21 @@ def main() -> int:
             selected_labels = []
             all_scores = []
             for code, label_id in code_map.items():
-                score = scores[code]
+                noul_score = noul_scores[code]
+                match_score = match_scores[code]
                 candidate = candidate_by_id[label_id]
                 label = labels_by_id[label_id]
-                all_scores.append(score)
-                if score < args.threshold:
+                all_scores.append(match_score)
+                if match_score < args.threshold:
                     continue
                 selected_labels.append(
                     {
                         "label_id": label_id,
                         "label_name": label.get("label_name", ""),
                         "label_path": format_label_path(label.get("label_path")),
-                        "score": score,
+                        "score": match_score,
+                        "match_score": match_score,
+                        "noul_score": noul_score,
                         "candidate_rank": candidate.get("candidate_rank")
                         or candidate.get("rank"),
                         "sources": candidate.get("sources", []),
@@ -219,7 +226,9 @@ def main() -> int:
                     {
                         "code": code,
                         "label_id": label_id,
-                        "score": scores[code],
+                        "score": match_scores[code],
+                        "match_score": match_scores[code],
+                        "noul_score": noul_scores[code],
                         "candidate_rank": (
                             candidate_by_id[label_id].get("candidate_rank")
                             or candidate_by_id[label_id].get("rank")
@@ -230,6 +239,8 @@ def main() -> int:
                 "selected_labels": selected_labels,
                 "none_of_candidates": not selected_labels,
                 "max_score": max(all_scores, default=None),
+                "score_semantics": "match_score=1-noul; higher means the Label matches",
+                "noul_semantics": "noul is the negative/no probability; lower means the Label matches",
                 "threshold": args.threshold,
                 "candidate_count": len(code_map),
                 "retrieval_version": candidate_rows[question_id].get(
@@ -261,6 +272,9 @@ def main() -> int:
         ),
         "processed_pairs_this_run": score_rows,
         "threshold": args.threshold,
+        "score_semantics": "match_score=1-noul; higher means the Label matches",
+        "noul_semantics": "noul is the negative/no probability; lower means the Label matches",
+        "noul_rejection_threshold": round(1.0 - args.threshold, 6),
         "max_len": args.max_len,
         "head_max_len": args.head_max_len,
         "selected_count_distribution": dict(sorted(selected_distribution.items())),
