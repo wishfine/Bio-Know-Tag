@@ -72,12 +72,12 @@ def test_laya_answers_to_scores_validates_and_preserves_codes():
     assert scores == {"C01": 0.2, "C02": 0.95}
 
 
-def test_laya_noul_scores_are_inverted_for_match_selection():
+def test_laya_noul_scores_are_match_probabilities():
     noul_scores = {"C01": 0.03, "C02": 0.95}
 
     assert laya_noul_to_match_scores(noul_scores) == {
-        "C01": 0.97,
-        "C02": 0.05,
+        "C01": 0.03,
+        "C02": 0.95,
     }
 
 

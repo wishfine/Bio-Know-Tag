@@ -8,7 +8,7 @@ from typing import Any
 from bio_know_tag.adjudication import build_adjudication_inputs
 
 
-LAYA_INPUT_VERSION = "laya-multilingual-ds-aligned-noul-v2-match-score"
+LAYA_INPUT_VERSION = "laya-multilingual-ds-aligned-noul-v3-true-probability"
 
 # This instruction is deliberately conservative. Laya answers one independent
 # binary question per candidate, so the policy must not rely on competition
@@ -76,11 +76,11 @@ def laya_answers_to_scores(
 
 
 def laya_noul_to_match_scores(noul_scores: dict[str, float]) -> dict[str, float]:
-    """Convert Laya's ``noul`` (negative/no) probability to match probability.
+    """Expose Laya's ``noul`` probability as the Label-match probability.
 
-    In the Laya/JeV output contract, ``noul`` is the probability of the
-    negative answer.  The playground therefore displays true as approximately
-    ``1 - noul``.  Keeping this conversion explicit prevents callers from
-    treating a high rejection probability as a positive Label match.
+    Laya's official ``noul`` primitive returns P(true), despite the unusual
+    name.  Keeping this explicit conversion helper (as an identity) makes the
+    selection semantics visible at the call site and prevents a future
+    inversion based on the name alone.
     """
-    return {code: round(1.0 - float(score), 10) for code, score in noul_scores.items()}
+    return {code: round(float(score), 10) for code, score in noul_scores.items()}
