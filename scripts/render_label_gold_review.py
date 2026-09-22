@@ -109,12 +109,16 @@ def main() -> int:
     parser.add_argument("--title", default="Label 人工金标审阅台")
     parser.add_argument("--storage-key", default="label-gold-review-v1")
     parser.add_argument("--page-size", type=int, default=50)
+    parser.add_argument("--recommended-only", action="store_true", help="render only rows marked recommended=true")
     args = parser.parse_args()
     if args.page_size < 1:
         raise SystemExit("--page-size must be positive")
 
     labels = load_labels(args.labels)
-    rows = [normalize_row(row, labels) for row in read_jsonl(args.selection_jsonl)]
+    input_rows = read_jsonl(args.selection_jsonl)
+    if args.recommended_only:
+        input_rows = [row for row in input_rows if row.get("recommended")]
+    rows = [normalize_row(row, labels) for row in input_rows]
     catalog = [normalize_card(label_id, labels) for label_id in sorted(labels)]
     template = Path("src/bio_know_tag/volatility_review_batch_template.html").read_text(encoding="utf-8")
     template = patch_template(template)
@@ -140,6 +144,7 @@ def main() -> int:
         "page_size": args.page_size,
         "storage_key": args.storage_key,
         "selection_input": str(args.selection_jsonl),
+        "recommended_only": args.recommended_only,
     }
     args.output_html.with_suffix(".report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
