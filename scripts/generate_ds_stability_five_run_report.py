@@ -98,6 +98,39 @@ def final_selected(row: dict[str, Any]) -> tuple[set[str], list[set[str]], int]:
     return strict_majority(choices), choices, parse_errors
 
 
+def output_evidence_reason(row: dict[str, Any]) -> list[dict[str, Any]]:
+    """Extract the model's evidence/reason without losing n-way choices."""
+    choices = row.get("choices")
+    if isinstance(choices, list):
+        outputs: list[dict[str, Any]] = []
+        for choice in choices:
+            parsed = choice.get("parsed_response")
+            if not isinstance(parsed, dict):
+                outputs.append({
+                    "choice": choice.get("index"),
+                    "parse_error": choice.get("parse_error"),
+                    "evidence": None,
+                    "reason": None,
+                })
+                continue
+            outputs.append({
+                "choice": choice.get("index"),
+                "parse_error": choice.get("parse_error"),
+                "evidence": parsed.get("evidence"),
+                "reason": parsed.get("reason"),
+            })
+        return outputs
+    parsed = row.get("parsed_response")
+    if isinstance(parsed, dict):
+        return [{
+            "choice": 0,
+            "parse_error": None,
+            "evidence": parsed.get("evidence"),
+            "reason": parsed.get("reason"),
+        }]
+    return [{"choice": 0, "parse_error": "missing parsed response", "evidence": None, "reason": None}]
+
+
 def jaccard(left: set[str], right: set[str]) -> float:
     union = left | right
     return 1.0 if not union else len(left & right) / len(union)
@@ -289,6 +322,10 @@ def main() -> int:
             "count_max": max(counts),
             "count_range": max(counts) - min(counts),
             "sets": sets,
+            "outputs": {
+                name: output_evidence_reason(rows[name][qid])
+                for name in RUN_NAMES
+            },
         })
 
     question_records.sort(key=lambda row: (row["mean_pair_jaccard"], -row["distinct_sets"], row["question_id"]))
@@ -414,6 +451,27 @@ def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[st
             label_text = "、".join(card(label_id, labels) for label_id in sorted(selected_ids)) or "（空）"
             lines.append(f"- `{run_name}`：{label_text}")
         lines.append("")
+        lines.append("#### DS 输出的 evidence / reason")
+        lines.append("")
+        lines.append("下面保留模型原始结构化输出中的 `evidence` 和 `reason`；n=4 条件会逐个列出四个 choice。")
+        lines.append("")
+        for run_name in RUN_NAMES:
+            lines.append(f"**`{run_name}`**")
+            for output in record["outputs"][run_name]:
+                choice = output.get("choice")
+                lines.append(f"- choice `{choice}`")
+                if output.get("parse_error"):
+                    lines.append(f"  - parse_error: `{output['parse_error']}`")
+                lines.append("  - evidence:")
+                lines.append("    ```json")
+                lines.append("    " + json.dumps(output.get("evidence"), ensure_ascii=False, indent=2).replace("\n", "\n    "))
+                lines.append("    ```")
+                lines.append("  - reason:")
+                lines.append("    ```text")
+                reason = str(output.get("reason") or "")
+                lines.append("    " + (reason or "（空）").replace("\n", "\n    "))
+                lines.append("    ```")
+            lines.append("")
 
     lines += [
         "## 五、最容易发生跨次变化的 Label",
