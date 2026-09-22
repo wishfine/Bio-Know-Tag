@@ -384,12 +384,18 @@ def main() -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     write_markdown(args.output, report, labels, units)
+    examples_output = args.output.parent / "ds-stability-question-examples-30.md"
+    write_question_examples(examples_output, report, labels, units)
     question_ranking_output = args.question_ranking_output or args.output.parent / "ds-stability-question-ranking-5391.md"
     label_ranking_output = args.label_ranking_output or args.output.parent / "ds-stability-label-ranking-458.md"
     write_question_ranking(question_ranking_output, all_question_records, labels, units)
     write_label_ranking(label_ranking_output, unstable_labels)
+    json_output = args.output.with_suffix(".json")
+    write_json_export(json_output, report, all_question_records, unstable_labels, labels, units)
     print(json.dumps({
         "output": str(args.output),
+        "examples_output": str(examples_output),
+        "json_output": str(json_output),
         "question_ranking_output": str(question_ranking_output),
         "label_ranking_output": str(label_ranking_output),
         "common_questions": len(common),
@@ -465,6 +471,134 @@ def write_label_ranking(path: Path, records: list[dict[str, Any]]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def write_question_examples(
+    path: Path,
+    report: dict[str, Any],
+    labels: dict[str, dict[str, Any]],
+    units: dict[str, dict[str, Any]],
+) -> None:
+    lines = [
+        "# DS 五次稳定性：前 30 道最不稳定题目",
+        "",
+        "> 本文从主报告中拆出题目示例，保留题干、解析、五次 Label，以及每次 DS 输出的 evidence/reason。n=4 条件逐个列出四个 choice。",
+        "",
+    ]
+    for index, record in enumerate(report["question_records"], 1):
+        qid = record["question_id"]
+        unit = units.get(qid, {})
+        lines += [
+            f"## {index}. 题目 `{qid}`",
+            "",
+            f"- 题型：`{unit.get('unit_type') or unit.get('metadata', {}).get('structure_type') or 'unknown'}`",
+            f"- 五次集合模式：`{record['classification']}`；不同集合数：{record['distinct_sets']}；平均两两 Jaccard：{record['mean_pair_jaccard']:.3f}；最低：{record['min_pair_jaccard']:.3f}",
+            f"- 五次选中数量：{record['count_min']}–{record['count_max']}（范围 {record['count_range']}）",
+            f"- 题干：{short_text(unit.get('stem'), 900) or '未提供'}",
+            f"- 解析：{short_text(unit.get('analysis'), 900) or '未提供/略'}",
+            "",
+        ]
+        for run_name, selected_ids in zip(RUN_NAMES, record["sets"]):
+            label_text = "、".join(card(label_id, labels) for label_id in sorted(selected_ids)) or "（空）"
+            lines.append(f"- `{run_name}`：{label_text}")
+        lines += [
+            "",
+            "### DS 输出的 evidence / reason",
+            "",
+            "以下保留模型原始结构化输出中的 `evidence` 和 `reason`。",
+            "",
+        ]
+        for run_name in RUN_NAMES:
+            lines.append(f"**`{run_name}`**")
+            for output in record["outputs"][run_name]:
+                lines.append(f"- choice `{output.get('choice')}`")
+                if output.get("parse_error"):
+                    lines.append(f"  - parse_error: `{output['parse_error']}`")
+                lines.append("  - evidence:")
+                lines.append("    ```json")
+                lines.append("    " + json.dumps(output.get("evidence"), ensure_ascii=False, indent=2).replace("\n", "\n    "))
+                lines.append("    ```")
+                lines.append("  - reason:")
+                lines.append("    ```text")
+                reason = str(output.get("reason") or "")
+                lines.append("    " + (reason or "（空）").replace("\n", "\n    "))
+                lines.append("    ```")
+            lines.append("")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _json_question_record(
+    record: dict[str, Any],
+    labels: dict[str, dict[str, Any]],
+    units: dict[str, dict[str, Any]],
+    *,
+    include_outputs: bool,
+) -> dict[str, Any]:
+    qid = record["question_id"]
+    unit = units.get(qid, {})
+    result = {
+        "question_id": qid,
+        "question_type": unit.get("unit_type") or unit.get("metadata", {}).get("structure_type") or "unknown",
+        "stem": unit.get("stem", ""),
+        "analysis": unit.get("analysis", ""),
+        "options": unit.get("options", ""),
+        "classification": record["classification"],
+        "distinct_sets": record["distinct_sets"],
+        "mean_pair_jaccard": round(record["mean_pair_jaccard"], 6),
+        "min_pair_jaccard": round(record["min_pair_jaccard"], 6),
+        "instability_score": round(1.0 - record["mean_pair_jaccard"], 6),
+        "count_min": record["count_min"],
+        "count_max": record["count_max"],
+        "count_range": record["count_range"],
+        "runs": [
+            {
+                "condition": condition,
+                "selected_label_ids": sorted(selected),
+                "selected_label_names": [str(labels.get(label_id, {}).get("label_name") or label_id) for label_id in sorted(selected)],
+            }
+            for condition, selected in zip(RUN_NAMES, record["sets"])
+        ],
+    }
+    if include_outputs:
+        result["ds_outputs"] = record["outputs"]
+    return result
+
+
+def write_json_export(
+    path: Path,
+    report: dict[str, Any],
+    all_question_records: list[dict[str, Any]],
+    unstable_labels: list[dict[str, Any]],
+    labels: dict[str, dict[str, Any]],
+    units: dict[str, dict[str, Any]],
+) -> None:
+    value = {
+        "metadata": {
+            "run_dir": report["run_dir"],
+            "run_names": report["run_names"],
+            "five_run_common_questions": report["five_run_common_questions"],
+            "definition": "question instability = 1 - mean pairwise Jaccard over the five final Label sets; n=4 uses strict majority",
+        },
+        "summary": {
+            "input_stats": report["input_stats"],
+            "choice_stats": report["choice_stats"],
+            "prompt_consistency_vs_original": report["prompt_consistency_vs_original"],
+            "pairwise": report["pairwise"],
+            "five_run_set_patterns": report["five_run_set_patterns"],
+        },
+        "question_ranking": [
+            _json_question_record(record, labels, units, include_outputs=False)
+            for record in all_question_records
+        ],
+        "question_examples_with_evidence_reason": [
+            _json_question_record(record, labels, units, include_outputs=True)
+            for record in report["question_records"]
+        ],
+        "label_ranking": unstable_labels,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[str, Any]], units: dict[str, dict[str, Any]]) -> None:
     lines: list[str] = [
         "# DeepSeek-V4-Flash 五次稳定性实验详细分析",
@@ -521,49 +655,11 @@ def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[st
         "",
         "这里的“集合模式”比较的是最终 Label 集合，而不是模型的 reasoning 文本。若五次集合相同，只能说明选标结果一致，不能说明模型内部推理完全一致。",
         "",
-        "## 四、最不稳定题目（具体题目与 Label）",
+        "## 四、最不稳定题目",
         "",
-        "以下按五次结果的平均两两 Jaccard 从低到高列出代表题。题干和解析来自 `pilot_units_5391.jsonl`；如果题目含图片而文本中没有完整信息，报告不会擅自补写图片内容。",
+        "前 30 道题的题干、解析、五次 Label 以及 evidence/reason 已移至 [ds-stability-question-examples-30.md](ds-stability-question-examples-30.md)。全部 5,391 道题的紧凑排序见 [ds-stability-question-ranking-5391.md](ds-stability-question-ranking-5391.md)。",
         "",
     ]
-    for index, record in enumerate(report["question_records"], 1):
-        qid = record["question_id"]
-        unit = units.get(qid, {})
-        lines += [
-            f"### {index}. 题目 `{qid}`",
-            "",
-            f"- 题型：`{unit.get('unit_type') or unit.get('metadata', {}).get('structure_type') or 'unknown'}`",
-            f"- 五次集合模式：`{record['classification']}`；不同集合数：{record['distinct_sets']}；平均两两 Jaccard：{record['mean_pair_jaccard']:.3f}；最低：{record['min_pair_jaccard']:.3f}",
-            f"- 五次选中数量：{record['count_min']}–{record['count_max']}（范围 {record['count_range']}）",
-            f"- 题干：{short_text(unit.get('stem'), 900) or '未提供'}",
-            f"- 解析：{short_text(unit.get('analysis'), 900) or '未提供/略'}",
-            "",
-        ]
-        for run_name, selected_ids in zip(RUN_NAMES, record["sets"]):
-            label_text = "、".join(card(label_id, labels) for label_id in sorted(selected_ids)) or "（空）"
-            lines.append(f"- `{run_name}`：{label_text}")
-        lines.append("")
-        lines.append("#### DS 输出的 evidence / reason")
-        lines.append("")
-        lines.append("下面保留模型原始结构化输出中的 `evidence` 和 `reason`；n=4 条件会逐个列出四个 choice。")
-        lines.append("")
-        for run_name in RUN_NAMES:
-            lines.append(f"**`{run_name}`**")
-            for output in record["outputs"][run_name]:
-                choice = output.get("choice")
-                lines.append(f"- choice `{choice}`")
-                if output.get("parse_error"):
-                    lines.append(f"  - parse_error: `{output['parse_error']}`")
-                lines.append("  - evidence:")
-                lines.append("    ```json")
-                lines.append("    " + json.dumps(output.get("evidence"), ensure_ascii=False, indent=2).replace("\n", "\n    "))
-                lines.append("    ```")
-                lines.append("  - reason:")
-                lines.append("    ```text")
-                reason = str(output.get("reason") or "")
-                lines.append("    " + (reason or "（空）").replace("\n", "\n    "))
-                lines.append("    ```")
-            lines.append("")
 
     lines += [
         "## 五、最容易发生跨次变化的 Label",
@@ -585,7 +681,7 @@ def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[st
         "- [5,391 道题不稳定度完整排序](ds-stability-question-ranking-5391.md)：按 `1 - 平均两两 Jaccard` 从高到低。",
         "- [458 个 Label 不稳定度完整排序](ds-stability-label-ranking-458.md)：按不稳定题占共同题比例从高到低，并附覆盖量和五次投票分布。",
         "",
-        "主报告第四节只展开最不稳定的 30 道题；完整排序文件保留全部题目和全部 Label。",
+        "题目示例已单独拆出；完整排序文件保留全部题目和全部 Label。",
         "",
         "## 七、结论与使用建议",
         "",
