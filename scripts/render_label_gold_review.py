@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -100,6 +101,34 @@ def normalize_row(row: dict[str, Any], labels: dict[str, dict[str, Any]]) -> dic
     return result
 
 
+def patch_gold_only_template(template: str) -> str:
+    """Keep the image-only review surface and show only the gold-label form."""
+    template = template.replace(
+        ".gold-other{margin-top:10px}",
+        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}",
+    )
+    template = template.replace(
+        "function currentReview(qid){return reviews[qid]||{decision:'',correct_labels:[],note:'',reviewed_at:''}}",
+        "function currentReview(qid){return reviews[qid]||{decision:'',gold_label_ids:[],other_label_text:'',no_label:false,note:'',reviewed_at:''}}",
+    )
+    render_function = r'''function renderGoldOptions(q,r){return (q.involved_labels||[]).map(x=>{const checked=(r.gold_label_ids||[]).includes(x.label_id);const original=x.is_original?'<span class=original-badge>原始 knw_id</span>':'';const sources=(x.sources||[]).map(s=>`<span class=source-badge>${esc(s)}</span>`).join('');return `<label class="gold-option ${x.is_original?'original':''}"><input type=checkbox ${checked?'checked':''} onchange="toggleGold('${q.question_id}','${x.label_id}',this.checked)"><span><b>${esc(x.label_name)} ${original}</b><small>${sources}<br>${esc(x.label_path)}</small></span></label>`}).join('')||'<div class=empty>没有可用候选Label</div>'}function renderCard(q,index){const r=currentReview(q.question_id),g=GROUP_META[q.perturbation_group]||GROUP_META.D_definition_ablation,imgs=[imageBox(q.parent_stem_image_url,'父题题干图'),imageBox(q.stem_image_url,'当前题干图'),imageBox(q.parent_analysis_image_url,'父题解析图'),imageBox(q.analysis_image_url,'当前题解析图')].join('')||'<div class=no-image>该题没有可加载的图片</div>',sourceNote=(q.source_reasons||[]).map(x=>`<span class=source-badge>${esc(x)}</span>`).join(''),definitionNote=(q.original_knw_label_note||q.original_knw_note||'');return `<article class=card id="q-${esc(q.question_id)}"><header class=card-head><span class=qid>#${index+1} · ID ${esc(q.question_id)}</span><span class="pill ${g.short}">${g.short} · ${esc(g.name)}</span><span class=meta>${esc(q.unit_type)} · 来源 ${sourceNote}</span></header><div class=body><div class=images>${imgs}</div><section class=gold-panel><div class=gold-title>最终金标 Label（请勾选）</div><div class=gold-note>所有涉及到的 Label 都列在下面。橙色边框表示可识别的原始/旧 knw_id。${definitionNote?`<br>${esc(definitionNote)}`:''}</div><div class=gold-grid>${renderGoldOptions(q,r)}</div><div class=gold-other><input value="${esc(r.other_label_text||'')}" placeholder="其他 Label / 老师建议（名称、路径或ID）" oninput="setOtherLabel('${q.question_id}',this.value)"></div><label class=gold-empty><input type=checkbox ${r.no_label?'checked':''} onchange="setNoLabel('${q.question_id}',this.checked)">确认：本题不应标任何 Label</label><textarea rows=3 placeholder="备注：为什么修改、Label边界问题、建议补充的释义…" oninput="setNote('${q.question_id}',this.value)">${esc(r.note||'')}</textarea></section></div></article>`}function render()'''
+    template = re.sub(
+        r"function renderCard\(q,index\)\{.*?function render\(\)",
+        render_function,
+        template,
+        flags=re.S,
+    )
+    template = template.replace(
+        "function setDecision(qid,v){const r=currentReview(qid);r.decision=v;r.reviewed_at=new Date().toISOString();reviews[qid]=r;save();render()}function toggleGold",
+        "function setDecision(qid,v){const r=currentReview(qid);r.decision=v;r.reviewed_at=new Date().toISOString();reviews[qid]=r;save();render()}function setNoLabel(qid,v){const r=currentReview(qid);r.no_label=v;if(v)r.gold_label_ids=[];r.reviewed_at=new Date().toISOString();reviews[qid]=r;save();render()}function toggleGold",
+    )
+    template = template.replace(
+        "const reviewed=filtered.filter(q=>reviews[q.question_id]?.decision).length",
+        "const reviewed=filtered.filter(q=>{const r=reviews[q.question_id]||{};return r.no_label||(r.gold_label_ids||[]).length||String(r.other_label_text||'').trim()}).length",
+    )
+    return template
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selection-jsonl", type=Path, required=True)
@@ -121,7 +150,7 @@ def main() -> int:
     rows = [normalize_row(row, labels) for row in input_rows]
     catalog = [normalize_card(label_id, labels) for label_id in sorted(labels)]
     template = Path("src/bio_know_tag/volatility_review_batch_template.html").read_text(encoding="utf-8")
-    template = patch_template(template)
+    template = patch_gold_only_template(patch_template(template))
     template = template.replace("高中生物 Label 波动复核台", args.title)
     template = template.replace("每页 50 题 · 图片审核", f"每页 {args.page_size} 题 · 人工金标")
     template = template.replace("50 QUESTIONS / PAGE · IMAGE ONLY", f"{args.page_size} QUESTIONS / PAGE · GOLD LABEL REVIEW")
