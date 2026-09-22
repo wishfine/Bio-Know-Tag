@@ -88,7 +88,20 @@ def normalize_row(row: dict[str, Any], labels: dict[str, dict[str, Any]]) -> dic
         involved.values(),
         key=lambda value: (not value.get("is_original"), value.get("label_name", ""), value["label_id"]),
     )
-    result.setdefault("source_reasons", [])
+    # Keep the provenance visible in the card header.  The selection file uses
+    # ``review_reasons`` (rather than the old renderer's ``source_reasons``),
+    # so derive the display fields here instead of making the HTML guess.
+    review_reasons = [str(value) for value in row.get("review_reasons") or []]
+    source_reasons = []
+    if "ds_volatility" in review_reasons:
+        source_reasons.append("DS多次波动")
+    if "definition_ablation" in review_reasons:
+        source_reasons.append("释义消融变化")
+    result["source_reasons"] = source_reasons
+    volatility_group = str((row.get("volatility") or {}).get("group") or "")
+    result["perturbation_group"] = volatility_group if volatility_group else (
+        "D_definition_ablation" if "definition_ablation" in review_reasons else ""
+    )
     result.setdefault("original_knw_label_note", "请根据数据来源确认原始knw_ids；橙色项是当前可识别的原始/旧Label。")
     result.setdefault("unit_type", "")
     result.setdefault("stem", "")
@@ -105,7 +118,7 @@ def patch_gold_only_template(template: str) -> str:
     """Keep the image-only review surface and show only the gold-label form."""
     template = template.replace(
         ".gold-other{margin-top:10px}",
-        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}",
+        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-panel textarea{width:100%;display:block;margin-top:10px;min-height:110px;resize:vertical;padding:12px;border:1px solid #58675f;border-radius:10px;background:#131b17;color:#fff}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}",
     )
     template = template.replace(
         "function currentReview(qid){return reviews[qid]||{decision:'',correct_labels:[],note:'',reviewed_at:''}}",
@@ -117,6 +130,13 @@ def patch_gold_only_template(template: str) -> str:
         render_function,
         template,
         flags=re.S,
+    )
+    # Do not label every selected row as a definition-ablation row.  The
+    # recommended pool is mixed: some rows come from DS instability, some from
+    # the definition ablation, and some are in both sets.
+    template = template.replace(
+        '<span class="pill ${g.short}">${g.short} · ${esc(g.name)}</span>',
+        '<span class="pill ${g.short}">${(q.source_reasons||[]).includes("释义消融变化") ? ((q.source_reasons||[]).includes("DS多次波动") ? "波动 + 释义" : "释义影响") : g.short+" · "+esc(g.name)}</span>',
     )
     template = template.replace(
         "function setDecision(qid,v){const r=currentReview(qid);r.decision=v;r.reviewed_at=new Date().toISOString();reviews[qid]=r;save();render()}function toggleGold",
