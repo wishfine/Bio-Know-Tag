@@ -48,11 +48,12 @@ def label_id(value: Any) -> str:
 
 def unit_legacy_ids(row: dict[str, Any]) -> set[str]:
     """Read historical IDs while tolerating the older unit exports."""
+    result: set[str] = set()
     for field in ("legacy_knw_ids", "legacy_label_ids", "knw_ids"):
         values = row.get(field)
         if isinstance(values, list):
-            return {label_id(value) for value in values if label_id(value)}
-    return set()
+            result.update(label_id(value) for value in values if label_id(value))
+    return result
 
 
 def selected_ids(row: dict[str, Any]) -> set[str]:
