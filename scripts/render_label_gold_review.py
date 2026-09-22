@@ -121,7 +121,7 @@ def patch_gold_only_template(template: str) -> str:
     """Keep the image-only review surface and show only the gold-label form."""
     template = template.replace(
         ".gold-other{margin-top:10px}",
-        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-panel textarea{width:100%;display:block;margin-top:10px;min-height:110px;resize:vertical;padding:12px;border:1px solid #58675f;border-radius:10px;background:#131b17;color:#fff}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}.explain-list{margin:0 -21px}.explain-item{padding:15px 21px;border-top:1px solid var(--line);font-size:14px;line-height:1.4;color:var(--ink)}.explain-item:last-child{border-bottom:1px solid var(--line)}",
+        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-panel textarea{width:100%;display:block;margin-top:10px;min-height:110px;resize:vertical;padding:12px;border:1px solid #58675f;border-radius:10px;background:#131b17;color:#fff}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}.explain-list{margin:0 -21px}.explain-item{padding:15px 21px;border-top:1px solid var(--line);font-size:14px;line-height:1.4;color:var(--ink)}.explain-item:last-child{border-bottom:1px solid var(--line)}.sub-question-marker{font-size:24px;font-weight:900;line-height:1.25;color:var(--ink);padding:2px 0 4px}",
     )
     template = template.replace(
         '<div class="filter-title">波动分组</div><button class="filter active" data-group="ALL">全部波动题 <b id="countALL">0</b></button><button class="filter" data-group="A_same_candidate_set">A · 同候选 <b id="countA">0</b></button><button class="filter" data-group="B_candidate_set_expanded_added_not_selected">B · 增候选未选中 <b id="countB">0</b></button><button class="filter" data-group="C_added_legacy_selected">C · 新旧Label被选中 <b id="countC">0</b></button><button class="filter" data-group="D_definition_ablation">D · 释义导致变化 <b id="countD">0</b></button>',
@@ -164,6 +164,17 @@ def patch_gold_only_template(template: str) -> str:
     template = template.replace(
         '<span class=meta>${esc(q.unit_type)}</span>',
         '<span class=meta>${q.unit_type===\'sub_question\'&&q.sub_question_number?`复合题第${q.sub_question_number}问`:q.unit_type===\'orphan_sub_question\'?\'缺失父题小题\':esc(q.unit_type)}</span>',
+    )
+    template = re.sub(
+        r"<span class=meta>\$\{q\.unit_type===.*?</span>",
+        "",
+        template,
+        count=1,
+        flags=re.S,
+    )
+    template = template.replace(
+        '<div class=body><div class=images>${imgs}</div>',
+        "<div class=body>${q.unit_type==='sub_question'&&q.sub_question_number?`<div class=sub-question-marker>复合题第${q.sub_question_number}问</div>`:q.unit_type==='orphan_sub_question'?'<div class=sub-question-marker>缺失父题小题</div>':''}<div class=images>${imgs}</div>",
     )
     # Do not label every selected row as a definition-ablation row.  The
     # recommended pool is mixed: some rows come from DS instability, some from
