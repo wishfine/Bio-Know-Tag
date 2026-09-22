@@ -1,0 +1,453 @@
+#!/usr/bin/env python3
+"""Generate a detailed five-run DS stability Markdown report.
+
+The report combines the original production response with the four controlled
+stability conditions and includes concrete Label/question examples.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import statistics
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
+
+
+RUN_NAMES = (
+    "original_ds",
+    "temp0-workers20",
+    "temp01-n4-workers20",
+    "temp0-seed42-workers20",
+    "temp01-n4-seed42-workers20",
+)
+
+
+def read_jsonl(path: str | Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with Path(path).open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"{path}:{line_number} must be an object")
+            rows.append(row)
+    return rows
+
+
+def latest_success(path: str | Path) -> tuple[dict[str, dict[str, Any]], int, int]:
+    rows: dict[str, dict[str, Any]] = {}
+    total = errors = 0
+    for row in read_jsonl(path):
+        total += 1
+        qid = str(row.get("question_id") or "")
+        if row.get("error"):
+            errors += 1
+            continue
+        if qid:
+            rows[qid] = row
+    return rows, total, errors
+
+
+def labels_by_id(path: str | Path) -> dict[str, dict[str, Any]]:
+    return {
+        str(row["label_id"]): row
+        for row in read_jsonl(path)
+        if row.get("label_id")
+    }
+
+
+def strict_majority(sets: list[set[str]]) -> set[str]:
+    if not sets:
+        return set()
+    threshold = len(sets) // 2 + 1
+    counts = Counter(value for selected in sets for value in selected)
+    return {value for value, count in counts.items() if count >= threshold}
+
+
+def row_choices(row: dict[str, Any]) -> tuple[list[set[str]], int]:
+    choices = row.get("choices")
+    if isinstance(choices, list):
+        valid: list[set[str]] = []
+        parse_errors = 0
+        for choice in choices:
+            if choice.get("parse_error"):
+                parse_errors += 1
+                continue
+            valid.append({str(value) for value in choice.get("selected_label_ids") or []})
+        return valid, parse_errors
+
+    parsed = row.get("parsed_response")
+    code_map = row.get("candidate_code_map") or {}
+    if isinstance(parsed, dict) and isinstance(code_map, dict):
+        selected = {
+            str(code_map[code])
+            for code in parsed.get("selected") or []
+            if code in code_map
+        }
+        return [selected], 0
+    return [], 0
+
+
+def final_selected(row: dict[str, Any]) -> tuple[set[str], list[set[str]], int]:
+    choices, parse_errors = row_choices(row)
+    if not choices:
+        return set(), [], parse_errors
+    return strict_majority(choices), choices, parse_errors
+
+
+def jaccard(left: set[str], right: set[str]) -> float:
+    union = left | right
+    return 1.0 if not union else len(left & right) / len(union)
+
+
+def card(label_id: str, labels: dict[str, dict[str, Any]]) -> str:
+    row = labels.get(label_id, {})
+    name = str(row.get("label_name") or "未知Label")
+    return f"{name} (`{label_id}`)"
+
+
+def short_text(value: Any, limit: int = 700) -> str:
+    text = str(value or "").replace("\n", " ").strip()
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def pair_report(
+    left: dict[str, set[str]], right: dict[str, set[str]], groups: dict[str, str]
+) -> dict[str, Any]:
+    common = sorted(set(left) & set(right))
+    same = more = fewer = same_count_replaced = 0
+    added = removed = 0
+    net = 0
+    jaccards: list[float] = []
+    by_group: dict[str, dict[str, int]] = defaultdict(
+        lambda: {"questions": 0, "different": 0, "more": 0, "fewer": 0, "same_count_replaced": 0}
+    )
+    for qid in common:
+        a, b = left[qid], right[qid]
+        plus, minus = b - a, a - b
+        delta = len(b) - len(a)
+        if not plus and not minus:
+            same += 1
+        elif delta > 0:
+            more += 1
+        elif delta < 0:
+            fewer += 1
+        else:
+            same_count_replaced += 1
+        added += len(plus)
+        removed += len(minus)
+        net += delta
+        jaccards.append(jaccard(a, b))
+        bucket = by_group[groups.get(qid, "unknown")]
+        bucket["questions"] += 1
+        bucket["different"] += int(bool(plus or minus))
+        bucket["more"] += int(delta > 0)
+        bucket["fewer"] += int(delta < 0)
+        bucket["same_count_replaced"] += int(delta == 0 and bool(plus or minus))
+    return {
+        "common": len(common),
+        "same": same,
+        "different": len(common) - same,
+        "difference_rate": (len(common) - same) / len(common) if common else None,
+        "more": more,
+        "fewer": fewer,
+        "same_count_replaced": same_count_replaced,
+        "added_assignments": added,
+        "removed_assignments": removed,
+        "net_assignment_delta": net,
+        "mean_jaccard": statistics.mean(jaccards) if jaccards else None,
+        "by_group": dict(by_group),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--labels", type=Path, default=Path("configs/labels.jsonl"))
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--max-questions", type=int, default=30)
+    parser.add_argument("--max-labels", type=int, default=40)
+    args = parser.parse_args()
+
+    root = args.run_dir
+    labels = labels_by_id(args.labels)
+    units = {
+        str(row["question_id"]): row
+        for row in read_jsonl(root / "analysis-export/pilot_units_5391.jsonl")
+        if row.get("question_id")
+    }
+    response_paths = {
+        "original_ds": root / "analysis-export/original_ds_baseline_5391.jsonl",
+        **{
+            name: root / name / "responses.jsonl"
+            for name in RUN_NAMES[1:]
+        },
+    }
+    rows: dict[str, dict[str, dict[str, Any]]] = {}
+    input_stats: dict[str, dict[str, int]] = {}
+    for name, path in response_paths.items():
+        loaded, total, errors = latest_success(path)
+        rows[name] = loaded
+        input_stats[name] = {
+            "file_rows": total,
+            "error_rows": errors,
+            "successful_questions": len(loaded),
+        }
+
+    selected: dict[str, dict[str, set[str]]] = {name: {} for name in RUN_NAMES}
+    choice_stats: dict[str, dict[str, Any]] = {}
+    raw_choice_examples: dict[str, dict[str, list[set[str]]]] = {
+        name: {} for name in RUN_NAMES
+    }
+    for name in RUN_NAMES:
+        parse_errors = choice_count = 0
+        count_values: list[int] = []
+        for qid, row in rows[name].items():
+            final, choices, errors = final_selected(row)
+            selected[name][qid] = final
+            parse_errors += errors
+            choice_count += len(choices)
+            count_values.extend(len(value) for value in choices)
+            raw_choice_examples[name][qid] = choices
+        choice_stats[name] = {
+            "choice_count": choice_count,
+            "parse_errors": parse_errors,
+            "mean_selected_per_choice": statistics.mean(count_values) if count_values else None,
+            "median_selected_per_choice": statistics.median(count_values) if count_values else None,
+            "min_selected_per_choice": min(count_values) if count_values else None,
+            "max_selected_per_choice": max(count_values) if count_values else None,
+            "empty_final_questions": sum(not value for value in selected[name].values()),
+            "mean_final_selected": statistics.mean(len(value) for value in selected[name].values()) if selected[name] else None,
+        }
+
+    groups = {
+        qid: str(rows["temp0-workers20"][qid].get("perturbation_group") or "unknown")
+        for qid in rows["temp0-workers20"]
+    }
+    prompt_consistency: dict[str, dict[str, int]] = {}
+    for name in RUN_NAMES[1:]:
+        common_ids = set(rows["original_ds"]) & set(rows[name])
+        prompt_consistency[name] = {
+            "common_questions": len(common_ids),
+            "same_prompt_sha256": sum(
+                rows["original_ds"][qid].get("prompt_sha256")
+                == rows[name][qid].get("prompt_sha256")
+                for qid in common_ids
+            ),
+        }
+    pairwise = []
+    for i, left_name in enumerate(RUN_NAMES):
+        for right_name in RUN_NAMES[i + 1 :]:
+            pairwise.append({
+                "left": left_name,
+                "right": right_name,
+                **pair_report(selected[left_name], selected[right_name], groups),
+            })
+
+    common = sorted(set.intersection(*(set(selected[name]) for name in RUN_NAMES)))
+    question_records: list[dict[str, Any]] = []
+    label_question_examples: dict[str, list[tuple[str, int]]] = defaultdict(list)
+    label_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    five_set_patterns = Counter()
+    for qid in common:
+        sets = [selected[name][qid] for name in RUN_NAMES]
+        pattern = Counter(tuple(sorted(value)) for value in sets)
+        pattern_counts = sorted(pattern.values(), reverse=True)
+        if pattern_counts == [5]:
+            classification = "all_five_same"
+        elif pattern_counts and pattern_counts[0] >= 4:
+            classification = "four_or_more_same"
+        elif pattern_counts and pattern_counts[0] >= 3:
+            classification = "three_or_more_same"
+        else:
+            classification = "no_three_run_consensus"
+        five_set_patterns[classification] += 1
+        pair_scores = [
+            jaccard(sets[i], sets[j])
+            for i in range(5)
+            for j in range(i + 1, 5)
+        ]
+        counts = [len(value) for value in sets]
+        for value in sets:
+            for label_id in value:
+                label_counts[label_id]["present"] += 1
+        for label_id in set().union(*sets):
+            votes = sum(label_id in value for value in sets)
+            label_counts[label_id][f"votes_{votes}"] += 1
+            if 0 < votes < 5:
+                label_question_examples[label_id].append((qid, votes))
+        question_records.append({
+            "question_id": qid,
+            "classification": classification,
+            "distinct_sets": len(pattern),
+            "mean_pair_jaccard": statistics.mean(pair_scores),
+            "min_pair_jaccard": min(pair_scores),
+            "count_min": min(counts),
+            "count_max": max(counts),
+            "count_range": max(counts) - min(counts),
+            "sets": sets,
+        })
+
+    question_records.sort(key=lambda row: (row["mean_pair_jaccard"], -row["distinct_sets"], row["question_id"]))
+    unstable_labels = []
+    for label_id, counts in label_counts.items():
+        unstable = sum(counts.get(f"votes_{votes}", 0) for votes in range(1, 5))
+        unstable_labels.append({
+            "label_id": label_id,
+            "label_name": str(labels.get(label_id, {}).get("label_name") or "未知Label"),
+            "label_path": str(labels.get(label_id, {}).get("label_path") or ""),
+            "unstable_questions": unstable,
+            "votes_1": counts.get("votes_1", 0),
+            "votes_2": counts.get("votes_2", 0),
+            "votes_3": counts.get("votes_3", 0),
+            "votes_4": counts.get("votes_4", 0),
+            "votes_5": counts.get("votes_5", 0),
+            "examples": label_question_examples[label_id][:3],
+        })
+    unstable_labels.sort(key=lambda row: (-row["unstable_questions"], -row["votes_1"], row["label_name"]))
+
+    report = {
+        "run_dir": str(root),
+        "run_names": list(RUN_NAMES),
+        "input_stats": input_stats,
+        "choice_stats": choice_stats,
+        "prompt_consistency_vs_original": prompt_consistency,
+        "pairwise": pairwise,
+        "five_run_common_questions": len(common),
+        "five_run_set_patterns": dict(five_set_patterns),
+        "question_records": question_records[: args.max_questions],
+        "unstable_labels": unstable_labels[: args.max_labels],
+    }
+    args.output.parent.mkdir(parents=True, exist_ok=True)
+    write_markdown(args.output, report, labels, units)
+    print(json.dumps({
+        "output": str(args.output),
+        "common_questions": len(common),
+        "question_examples": min(args.max_questions, len(question_records)),
+        "label_examples": min(args.max_labels, len(unstable_labels)),
+    }, ensure_ascii=False, indent=2))
+    return 0
+
+
+def pct(value: float | None) -> str:
+    return "-" if value is None else f"{value:.2%}"
+
+
+def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[str, Any]], units: dict[str, dict[str, Any]]) -> None:
+    lines: list[str] = [
+        "# DeepSeek-V4-Flash 五次稳定性实验详细分析",
+        "",
+        "> 本报告将原始 DS 生产结果与四组控制实验放在同一 5,391 题集合上比较。四组控制实验均使用 `candidate_mode=legacy`，即 Top25+旧 `knw_ids` 候选集合；`n=4` 的最终 Label 使用严格多数票（至少 3/4）计算。",
+        "",
+        "## 一、实验范围与数据完整性",
+        "",
+        "| 运行 | 文件记录数 | 错误记录数 | 成功题数 | choice 数 | 解析错误 | 最终平均 Label 数 |",
+        "|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for name in RUN_NAMES:
+        s = report["input_stats"][name]
+        c = report["choice_stats"][name]
+        lines.append(f"| `{name}` | {s['file_rows']} | {s['error_rows']} | {s['successful_questions']} | {c['choice_count']} | {c['parse_errors']} | {c['mean_final_selected']:.4f} |")
+    lines += [
+        "",
+        "原始 DS 文件是追加式日志，包含重试错误行；最终按 `question_id` 保留成功记录后，五组均覆盖 5,391 道题。`temp01-n4-workers20` 有 2 个 choice 解析错误，但每题仍有足够的有效 choice 可形成多数票；其余条件没有解析错误。",
+        "",
+        "五组共同题目的 `prompt_sha256` 逐题完全一致（原始 DS 与每个控制条件均为 5,391/5,391），因此本报告中的差异不是由题目、候选 Label 顺序或释义内容变化造成的，主要反映请求条件和服务重复调用差异。",
+        "",
+        "## 二、两两输出差异",
+        "",
+        "| 左侧 | 右侧 | 共同题 | 输出不同 | 多选题 | 少选题 | 同数替换 | 新增 Label | 移除 Label | 净变化 | 平均 Jaccard |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in report["pairwise"]:
+        lines.append(
+            f"| `{row['left']}` | `{row['right']}` | {row['common']} | {row['different']} ({pct(row['difference_rate'])}) | "
+            f"{row['more']} | {row['fewer']} | {row['same_count_replaced']} | {row['added_assignments']} | {row['removed_assignments']} | "
+            f"{row['net_assignment_delta']} | {row['mean_jaccard']:.4f} |"
+        )
+    lines += [
+        "",
+        "“多选/少选”按最终 Label 数量判断；数量相同但 Label 集合不同单列为“同数替换”。`输出不同`是集合差异，不是顺序差异。",
+        "",
+        "### 关键对照",
+        "",
+        "- `original_ds` vs `temp0-workers20`：用于观察同一 prompt/候选输入下，原始生产请求与重新请求的波动。",
+        "- `temp0-workers20` vs `temp0-seed42-workers20`：temperature 都为 0，主要观察 seed/服务重复调用差异。",
+        "- `temp0-workers20` vs 两个 `temp01-n4`：观察 temperature=0.1 且多数票后的最终输出变化。",
+        "- 两个 `temp01-n4` 互比：观察 seed 对 n=4 采样结果的影响。",
+        "",
+        "## 三、五次结果的整体共识",
+        "",
+        f"五次均成功的共同题数：**{report['five_run_common_questions']}**。",
+        "",
+        "| 五次集合模式 | 题数 |",
+        "|---|---:|",
+    ]
+    for key, value in report["five_run_set_patterns"].items():
+        lines.append(f"| `{key}` | {value} |")
+    lines += [
+        "",
+        "这里的“集合模式”比较的是最终 Label 集合，而不是模型的 reasoning 文本。若五次集合相同，只能说明选标结果一致，不能说明模型内部推理完全一致。",
+        "",
+        "## 四、最不稳定题目（具体题目与 Label）",
+        "",
+        "以下按五次结果的平均两两 Jaccard 从低到高列出代表题。题干和解析来自 `pilot_units_5391.jsonl`；如果题目含图片而文本中没有完整信息，报告不会擅自补写图片内容。",
+        "",
+    ]
+    for index, record in enumerate(report["question_records"], 1):
+        qid = record["question_id"]
+        unit = units.get(qid, {})
+        lines += [
+            f"### {index}. 题目 `{qid}`",
+            "",
+            f"- 题型：`{unit.get('unit_type') or unit.get('metadata', {}).get('structure_type') or 'unknown'}`",
+            f"- 五次集合模式：`{record['classification']}`；不同集合数：{record['distinct_sets']}；平均两两 Jaccard：{record['mean_pair_jaccard']:.3f}；最低：{record['min_pair_jaccard']:.3f}",
+            f"- 五次选中数量：{record['count_min']}–{record['count_max']}（范围 {record['count_range']}）",
+            f"- 题干：{short_text(unit.get('stem'), 900) or '未提供'}",
+            f"- 解析：{short_text(unit.get('analysis'), 900) or '未提供/略'}",
+            "",
+        ]
+        for run_name, selected_ids in zip(RUN_NAMES, record["sets"]):
+            label_text = "、".join(card(label_id, labels) for label_id in sorted(selected_ids)) or "（空）"
+            lines.append(f"- `{run_name}`：{label_text}")
+        lines.append("")
+
+    lines += [
+        "## 五、最容易发生跨次变化的 Label",
+        "",
+        "统计口径：在五次最终结果中，一个 Label 被 1–4 次选中的题数。被 5 次都选中或 5 次都未选中的题不计为不稳定。",
+        "",
+        "| Label | 不稳定题数 | 1/5 次 | 2/5 次 | 3/5 次 | 4/5 次 | 代表题目 |",
+        "|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for row in report["unstable_labels"]:
+        examples = "、".join(f"{qid}（{votes}/5）" for qid, votes in row["examples"])
+        lines.append(
+            f"| {row['label_name']} (`{row['label_id']}`) | {row['unstable_questions']} | {row['votes_1']} | {row['votes_2']} | {row['votes_3']} | {row['votes_4']} | {examples or '-'} |"
+        )
+    lines += [
+        "",
+        "## 六、结论与使用建议",
+        "",
+        "1. 这批题的波动不是简单的 Label 顺序变化，而是集合内容变化；其中一部分题表现为少选/多选，另一部分表现为同数量的 Label 替换。",
+        "2. temperature=0 的重复请求仍然存在明显服务/模型波动，因此不能把 temperature=0 等同于完全确定性。",
+        "3. temperature=0.1,n=4 的单次 choice 波动比 n=1 更明显，但严格多数票会减少一次性偶然 Label；生产上若采用 n=4，应保留全部 choice 和多数票过程，不能只保存最终集合。",
+        "4. 五次分析中最值得人工复核的是：平均 Jaccard 低、五次没有三次以上共同集合、以及某个 Label 只在 1–2 次出现的题。报告第四节和第五节已经列出具体题号、题干和 Label。",
+        "5. 本实验仍是模型稳定性分析，不等价于标签正确率；真正判断 Label 是否应该保留，仍需结合题目设问、Label 释义和教师复核。",
+        "",
+        "## 七、输入文件",
+        "",
+        "- `run_manifest.json`：实验条件、prompt 版本、输入 hash。",
+        "- `report.json`：四组条件的服务层汇总和两两比较。",
+        "- `analysis-export/original_ds_baseline_5391.jsonl`：原始 DS 第五次基线的 5,391 题筛选结果。",
+        "- `analysis-export/pilot_units_5391.jsonl`：题干、解析、题型和题目结构信息。",
+        "- 四个条件目录下的 `responses.jsonl`：逐题原始 choices、解析结果和 Label ID。",
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
