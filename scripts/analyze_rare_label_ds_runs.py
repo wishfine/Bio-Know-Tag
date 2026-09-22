@@ -79,7 +79,29 @@ def load_latest(path: Path) -> dict[str, dict[str, Any]]:
     for row in read_jsonl(path):
         qid = str(row.get("question_id") or "")
         if qid:
-            rows[qid] = row
+            previous = rows.get(qid)
+            # A resumed run can append an error after an earlier successful
+            # response (or vice versa). Prefer a parseable success so a
+            # transient endpoint failure does not look like missing recall.
+            current_success = bool(
+                not row.get("error")
+                and (
+                    isinstance(row.get("parsed_response"), dict)
+                    or any(isinstance(choice, dict) and isinstance(choice.get("parsed_response"), dict) for choice in row.get("choices") or [])
+                    or isinstance(row.get("selected_label_ids"), list)
+                )
+            )
+            previous_success = bool(
+                previous
+                and not previous.get("error")
+                and (
+                    isinstance(previous.get("parsed_response"), dict)
+                    or any(isinstance(choice, dict) and isinstance(choice.get("parsed_response"), dict) for choice in previous.get("choices") or [])
+                    or isinstance(previous.get("selected_label_ids"), list)
+                )
+            )
+            if previous is None or current_success or not previous_success:
+                rows[qid] = row
     return rows
 
 
