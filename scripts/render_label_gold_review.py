@@ -139,6 +139,25 @@ def patch_gold_only_template(template: str) -> str:
         template,
         flags=re.S,
     )
+    # Hide experiment provenance from teachers: the gold-label panel should
+    # present only the candidate Label name and path, not source badges or
+    # original-knw_id markers.
+    template = re.sub(
+        r"function renderGoldOptions\(q,r\)\{.*?\}function renderCard",
+        r'''function renderGoldOptions(q,r){return (q.involved_labels||[]).map(x=>{const checked=(r.gold_label_ids||[]).includes(x.label_id);return `<label class=gold-option><input type=checkbox ${checked?'checked':''} onchange="toggleGold('${q.question_id}','${x.label_id}',this.checked)"><span><b>${esc(x.label_name)}</b><small>${esc(x.label_path)}</small></span></label>`}).join('')||'<div class=empty>没有可用候选Label</div>'}function renderCard''',
+        template,
+        flags=re.S,
+    )
+    template = re.sub(
+        r"<div class=gold-title>最终金标 Label（请勾选）</div><div class=gold-note>.*?</div><div class=gold-grid>",
+        "<div class=gold-title>Label（请勾选）</div><div class=gold-grid>",
+        template,
+        flags=re.S,
+    )
+    template = template.replace(
+        '<span class=meta>${esc(q.unit_type)} · 来源 ${sourceNote}</span>',
+        '<span class=meta>${esc(q.unit_type)}</span>',
+    )
     # Do not label every selected row as a definition-ablation row.  The
     # recommended pool is mixed: some rows come from DS instability, some from
     # the definition ablation, and some are in both sets.
