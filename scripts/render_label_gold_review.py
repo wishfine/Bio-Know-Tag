@@ -104,6 +104,9 @@ def normalize_row(row: dict[str, Any], labels: dict[str, dict[str, Any]]) -> dic
     )
     result.setdefault("original_knw_label_note", "请根据数据来源确认原始knw_ids；橙色项是当前可识别的原始/旧Label。")
     result.setdefault("unit_type", "")
+    result.setdefault("parent_id", "")
+    result.setdefault("sibling_question_ids", [])
+    result.setdefault("sub_question_number", None)
     result.setdefault("stem", "")
     result.setdefault("options", "")
     result.setdefault("answer_text", "")
@@ -157,6 +160,10 @@ def patch_gold_only_template(template: str) -> str:
     template = template.replace(
         '<span class=meta>${esc(q.unit_type)} · 来源 ${sourceNote}</span>',
         '<span class=meta>${esc(q.unit_type)}</span>',
+    )
+    template = template.replace(
+        '<span class=meta>${esc(q.unit_type)}</span>',
+        '<span class=meta>${q.unit_type===\'sub_question\'&&q.sub_question_number?`复合题第${q.sub_question_number}问`:q.unit_type===\'orphan_sub_question\'?\'缺失父题小题\':esc(q.unit_type)}</span>',
     )
     # Do not label every selected row as a definition-ablation row.  The
     # recommended pool is mixed: some rows come from DS instability, some from
