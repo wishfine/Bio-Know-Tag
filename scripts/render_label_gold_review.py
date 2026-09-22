@@ -118,7 +118,15 @@ def patch_gold_only_template(template: str) -> str:
     """Keep the image-only review surface and show only the gold-label form."""
     template = template.replace(
         ".gold-other{margin-top:10px}",
-        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-panel textarea{width:100%;display:block;margin-top:10px;min-height:110px;resize:vertical;padding:12px;border:1px solid #58675f;border-radius:10px;background:#131b17;color:#fff}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}",
+        ".gold-other{margin-top:10px}.gold-other input{width:100%;display:block}.gold-panel textarea{width:100%;display:block;margin-top:10px;min-height:110px;resize:vertical;padding:12px;border:1px solid #58675f;border-radius:10px;background:#131b17;color:#fff}.gold-empty{display:block;margin-top:10px;color:#dfeae2;font-size:12px}.gold-empty input{accent-color:#e4b58e;margin-right:6px}.explain-list{margin:0 -21px}.explain-item{padding:15px 21px;border-top:1px solid var(--line);font-size:14px;line-height:1.4;color:var(--ink)}.explain-item:last-child{border-bottom:1px solid var(--line)}",
+    )
+    template = template.replace(
+        '<div class="filter-title">波动分组</div><button class="filter active" data-group="ALL">全部波动题 <b id="countALL">0</b></button><button class="filter" data-group="A_same_candidate_set">A · 同候选 <b id="countA">0</b></button><button class="filter" data-group="B_candidate_set_expanded_added_not_selected">B · 增候选未选中 <b id="countB">0</b></button><button class="filter" data-group="C_added_legacy_selected">C · 新旧Label被选中 <b id="countC">0</b></button><button class="filter" data-group="D_definition_ablation">D · 释义导致变化 <b id="countD">0</b></button>',
+        '<div class="filter-title">说明</div><div class="explain-list"><div class="explain-item">同时发生 DS 波动和释义影响</div><div class="explain-item">释义导致 False/True 状态变化</div><div class="explain-item">释义导致分数明显变化</div><div class="explain-item">DS 波动分数高</div><div class="explain-item">其余高价值波动题</div></div>',
+    )
+    template = template.replace(
+        "const c={A:0,B:0,C:0,D:0};DATA.forEach(q=>c[(GROUP_META[q.perturbation_group]||GROUP_META.D_definition_ablation).short]++);document.getElementById('countALL').textContent=DATA.length;for(const k of ['A','B','C','D'])document.getElementById('count'+k).textContent=c[k]",
+        "function updateCounts(){}",
     )
     template = template.replace(
         "function currentReview(qid){return reviews[qid]||{decision:'',correct_labels:[],note:'',reviewed_at:''}}",
