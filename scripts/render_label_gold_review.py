@@ -60,8 +60,8 @@ def normalize_row(row: dict[str, Any], labels: dict[str, dict[str, Any]]) -> dic
     original_ids = {str(value) for value in row.get("original_knw_label_ids") or []}
     involved: dict[str, dict[str, Any]] = {}
     for field, source in (
-        ("top25_labels", "Top25召回"),
-        ("legacy_labels", "Top25+旧knw_ids结果"),
+        ("top25_labels", "纯Top25 DS选中"),
+        ("legacy_labels", "Top25+旧knw_ids DS选中"),
         ("added_candidate_labels", "新增旧knw_ids候选"),
         ("selected_added_legacy_labels", "新增旧Label被选中"),
     ):
