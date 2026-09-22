@@ -98,6 +98,17 @@ def normalize_row(row: dict[str, Any], labels: dict[str, dict[str, Any]]) -> dic
     if "definition_ablation" in review_reasons:
         source_reasons.append("释义消融变化")
     result["source_reasons"] = source_reasons
+    tier = str(row.get("priority_tier") or "")
+    if tier == "S_INTERSECTION":
+        result["display_category"] = "同时发生 DS 波动和释义影响"
+    elif tier == "A_ABLATION_STATUS_CHANGE":
+        result["display_category"] = "释义导致 False/True 状态变化"
+    elif tier == "B_ABLATION_SCORE_SHIFT":
+        result["display_category"] = "释义导致分数明显变化"
+    elif tier == "B_HIGH_VOLATILITY":
+        result["display_category"] = "DS 波动分数高"
+    else:
+        result["display_category"] = "其余高价值波动题"
     volatility_group = str((row.get("volatility") or {}).get("group") or "")
     result["perturbation_group"] = volatility_group if volatility_group else (
         "D_definition_ablation" if "definition_ablation" in review_reasons else ""
@@ -181,7 +192,7 @@ def patch_gold_only_template(template: str) -> str:
     # the definition ablation, and some are in both sets.
     template = template.replace(
         '<span class="pill ${g.short}">${g.short} · ${esc(g.name)}</span>',
-        '<span class="pill ${g.short}">${(q.source_reasons||[]).includes("释义消融变化") ? ((q.source_reasons||[]).includes("DS多次波动") ? "波动 + 释义" : "释义影响") : g.short+" · "+esc(g.name)}</span>',
+        '<span class="pill ${g.short}">${esc(q.display_category||g.name)}</span>',
     )
     template = template.replace(
         "function setDecision(qid,v){const r=currentReview(qid);r.decision=v;r.reviewed_at=new Date().toISOString();reviews[qid]=r;save();render()}function toggleGold",
