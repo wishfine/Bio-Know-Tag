@@ -66,7 +66,6 @@ def main() -> int:
         else:
             changes["true_to_false"] += 1
             change = "true_to_false"
-        changes[change] += 1
         stats = per_label[label_id]
         stats["label_id"] = label_id
         stats["total"] += 1
