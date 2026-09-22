@@ -116,6 +116,13 @@ def main() -> int:
             "analysis_image_url": v.get("analysis_image_url", ""),
             "original_knw_label_ids": sorted(original),
             "involved_label_ids": sorted(involved),
+            "top25_labels": v.get("top25_labels", []),
+            "legacy_labels": v.get("legacy_labels", []),
+            "shared_labels": v.get("shared_labels", []),
+            "top25_only_labels": v.get("top25_only_labels", []),
+            "legacy_only_labels": v.get("legacy_only_labels", []),
+            "added_candidate_labels": v.get("added_candidate_labels", []),
+            "selected_added_legacy_labels": v.get("selected_added_legacy_labels", []),
             "historical_label_note": "释义消融配对中的测试Label及波动结果中的可识别旧Label；最终需教师确认。",
         }
         rows.append(row)
