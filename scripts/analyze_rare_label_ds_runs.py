@@ -169,6 +169,10 @@ def build_report(
                 "options": unit.get("options") or "",
                 "answer_text": unit.get("answer_text") or "",
                 "analysis": unit.get("analysis") or "",
+                "stem_image_url": unit.get("stem_image_url") or "",
+                "analysis_image_url": unit.get("analysis_image_url") or "",
+                "parent_stem_image_url": unit.get("parent_stem_image_url") or "",
+                "parent_analysis_image_url": unit.get("parent_analysis_image_url") or "",
                 "top25": {
                     "evidence_found": top_row is not None,
                     "candidate_count": len(top_candidates),
