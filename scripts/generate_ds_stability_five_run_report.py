@@ -201,6 +201,8 @@ def main() -> int:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--labels", type=Path, default=Path("configs/labels.jsonl"))
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--question-ranking-output", type=Path)
+    parser.add_argument("--label-ranking-output", type=Path)
     parser.add_argument("--max-questions", type=int, default=30)
     parser.add_argument("--max-labels", type=int, default=40)
     args = parser.parse_args()
@@ -330,13 +332,20 @@ def main() -> int:
 
     question_records.sort(key=lambda row: (row["mean_pair_jaccard"], -row["distinct_sets"], row["question_id"]))
     unstable_labels = []
-    for label_id, counts in label_counts.items():
+    for label_id in labels:
+        counts = label_counts.get(label_id, Counter())
         unstable = sum(counts.get(f"votes_{votes}", 0) for votes in range(1, 5))
+        union_questions = sum(counts.get(f"votes_{votes}", 0) for votes in range(1, 6))
+        instability_rate = unstable / len(common) if common else 0.0
+        conditional_rate = unstable / union_questions if union_questions else 0.0
         unstable_labels.append({
             "label_id": label_id,
             "label_name": str(labels.get(label_id, {}).get("label_name") or "未知Label"),
             "label_path": str(labels.get(label_id, {}).get("label_path") or ""),
             "unstable_questions": unstable,
+            "union_questions": union_questions,
+            "instability_rate": instability_rate,
+            "conditional_instability_rate": conditional_rate,
             "votes_1": counts.get("votes_1", 0),
             "votes_2": counts.get("votes_2", 0),
             "votes_3": counts.get("votes_3", 0),
@@ -344,7 +353,22 @@ def main() -> int:
             "votes_5": counts.get("votes_5", 0),
             "examples": label_question_examples[label_id][:3],
         })
-    unstable_labels.sort(key=lambda row: (-row["unstable_questions"], -row["votes_1"], row["label_name"]))
+    unstable_labels.sort(key=lambda row: (
+        -row["instability_rate"],
+        -row["unstable_questions"],
+        -row["conditional_instability_rate"],
+        row["label_name"],
+    ))
+
+    all_question_records = sorted(
+        question_records,
+        key=lambda row: (
+            -1.0 * (1.0 - row["mean_pair_jaccard"]),
+            -row["distinct_sets"],
+            -row["count_range"],
+            row["question_id"],
+        ),
+    )
 
     report = {
         "run_dir": str(root),
@@ -355,22 +379,90 @@ def main() -> int:
         "pairwise": pairwise,
         "five_run_common_questions": len(common),
         "five_run_set_patterns": dict(five_set_patterns),
-        "question_records": question_records[: args.max_questions],
+        "question_records": all_question_records[: args.max_questions],
         "unstable_labels": unstable_labels[: args.max_labels],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     write_markdown(args.output, report, labels, units)
+    question_ranking_output = args.question_ranking_output or args.output.parent / "ds-stability-question-ranking-5391.md"
+    label_ranking_output = args.label_ranking_output or args.output.parent / "ds-stability-label-ranking-458.md"
+    write_question_ranking(question_ranking_output, all_question_records, labels, units)
+    write_label_ranking(label_ranking_output, unstable_labels)
     print(json.dumps({
         "output": str(args.output),
+        "question_ranking_output": str(question_ranking_output),
+        "label_ranking_output": str(label_ranking_output),
         "common_questions": len(common),
-        "question_examples": min(args.max_questions, len(question_records)),
+        "question_examples": min(args.max_questions, len(all_question_records)),
         "label_examples": min(args.max_labels, len(unstable_labels)),
+        "question_ranking_count": len(all_question_records),
+        "label_ranking_count": len(unstable_labels),
     }, ensure_ascii=False, indent=2))
     return 0
 
 
 def pct(value: float | None) -> str:
     return "-" if value is None else f"{value:.2%}"
+
+
+def ranking_label_text(label_ids: set[str], labels: dict[str, dict[str, Any]], limit: int = 180) -> str:
+    text = "；".join(str(labels.get(label_id, {}).get("label_name") or label_id) for label_id in sorted(label_ids))
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def write_question_ranking(
+    path: Path,
+    records: list[dict[str, Any]],
+    labels: dict[str, dict[str, Any]],
+    units: dict[str, dict[str, Any]],
+) -> None:
+    lines = [
+        "# DS 五次稳定性：5,391 道题不稳定度完整排序",
+        "",
+        "> 排序分数 = `1 - 五次最终 Label 集合的平均两两 Jaccard`，分数越高表示五次输出越不一致。n=4 条件使用严格多数票；同分时依次按不同集合数、选中数量范围降序排列。",
+        "",
+        f"共 {len(records)} 道题，全部来自五次共同成功题。主报告中的前 30 道题包含完整题干、解析以及五次 evidence/reason；本表为全部题的紧凑排序。",
+        "",
+        "| 排名 | 不稳定分数 | 题目ID | 题型 | 平均Jaccard | 不同集合数 | 选中数范围 | 五次模式 | 题干 | original_ds | temp0 | n4 | seed42 | n4+seed42 |",
+        "|---:|---:|---|---|---:|---:|---:|---|---|---|---|---|---|---|",
+    ]
+    for rank, record in enumerate(records, 1):
+        qid = record["question_id"]
+        unit = units.get(qid, {})
+        run_cells = [ranking_label_text(set(value), labels) or "-" for value in record["sets"]]
+        qtype = unit.get("unit_type") or unit.get("metadata", {}).get("structure_type") or "unknown"
+        lines.append(
+            f"| {rank} | {1.0 - record['mean_pair_jaccard']:.4f} | `{qid}` | `{qtype}` | "
+            f"{record['mean_pair_jaccard']:.4f} | {record['distinct_sets']} | {record['count_min']}–{record['count_max']} | "
+            f"`{record['classification']}` | {short_text(unit.get('stem'), 260)} | "
+            + " | ".join(run_cells)
+            + " |"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def write_label_ranking(path: Path, records: list[dict[str, Any]]) -> None:
+    lines = [
+        "# DS 五次稳定性：458 个 Label 不稳定度完整排序",
+        "",
+        "> 默认按 `不稳定题占全部 5,391 道共同题的比例`降序；不稳定题指该 Label 在五次最终结果中被选中 1–4 次。表中同时保留该 Label 实际出现过的题数，以及在出现过的题中发生不一致的条件比例。",
+        "",
+        f"共 {len(records)} 个 Label。",
+        "",
+        "| 排名 | Label | Label路径 | 不稳定分数 | 不稳定题数 | 出现题数 | 出现条件不稳定率 | 1/5 | 2/5 | 3/5 | 4/5 | 5/5 | 代表题目 |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for rank, row in enumerate(records, 1):
+        examples = "、".join(f"`{qid}`({votes}/5)" for qid, votes in row["examples"])
+        lines.append(
+            f"| {rank} | {row['label_name']} (`{row['label_id']}`) | {row['label_path']} | "
+            f"{row['instability_rate']:.4%} | {row['unstable_questions']} | {row['union_questions']} | "
+            f"{row['conditional_instability_rate']:.2%} | {row['votes_1']} | {row['votes_2']} | "
+            f"{row['votes_3']} | {row['votes_4']} | {row['votes_5']} | {examples or '-'} |"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[str, Any]], units: dict[str, dict[str, Any]]) -> None:
@@ -488,7 +580,14 @@ def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[st
         )
     lines += [
         "",
-        "## 六、结论与使用建议",
+        "## 六、完整排序文件",
+        "",
+        "- [5,391 道题不稳定度完整排序](ds-stability-question-ranking-5391.md)：按 `1 - 平均两两 Jaccard` 从高到低。",
+        "- [458 个 Label 不稳定度完整排序](ds-stability-label-ranking-458.md)：按不稳定题占共同题比例从高到低，并附覆盖量和五次投票分布。",
+        "",
+        "主报告第四节只展开最不稳定的 30 道题；完整排序文件保留全部题目和全部 Label。",
+        "",
+        "## 七、结论与使用建议",
         "",
         "1. 这批题的波动不是简单的 Label 顺序变化，而是集合内容变化；其中一部分题表现为少选/多选，另一部分表现为同数量的 Label 替换。",
         "2. temperature=0 的重复请求仍然存在明显服务/模型波动，因此不能把 temperature=0 等同于完全确定性。",
@@ -496,7 +595,7 @@ def write_markdown(path: Path, report: dict[str, Any], labels: dict[str, dict[st
         "4. 五次分析中最值得人工复核的是：平均 Jaccard 低、五次没有三次以上共同集合、以及某个 Label 只在 1–2 次出现的题。报告第四节和第五节已经列出具体题号、题干和 Label。",
         "5. 本实验仍是模型稳定性分析，不等价于标签正确率；真正判断 Label 是否应该保留，仍需结合题目设问、Label 释义和教师复核。",
         "",
-        "## 七、输入文件",
+        "## 八、输入文件",
         "",
         "- `run_manifest.json`：实验条件、prompt 版本、输入 hash。",
         "- `report.json`：四组条件的服务层汇总和两两比较。",
