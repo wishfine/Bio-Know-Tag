@@ -158,7 +158,7 @@ def patch_gold_only_template(template: str) -> str:
     # original-knw_id markers.
     template = re.sub(
         r"function renderGoldOptions\(q,r\)\{.*?\}function renderCard",
-        r'''function renderGoldOptions(q,r){return (q.involved_labels||[]).map(x=>{const checked=(r.gold_label_ids||[]).includes(x.label_id);return `<label class=gold-option><input type=checkbox ${checked?'checked':''} onchange="toggleGold('${q.question_id}','${x.label_id}',this.checked)"><span><b>${esc(x.label_name)}</b><small>${esc(x.label_path)}</small></span></label>`}).join('')||'<div class=empty>没有可用候选Label</div>'}function renderCard''',
+        r'''function renderGoldOptions(q,r){return (q.involved_labels||[]).map(x=>{const checked=(r.gold_label_ids||[]).includes(x.label_id);const original=x.is_original?'<span class=original-badge>原始 knw_id</span>':'';return `<label class="gold-option ${x.is_original?'original':''}"><input type=checkbox ${checked?'checked':''} onchange="toggleGold('${q.question_id}','${x.label_id}',this.checked)"><span><b>${esc(x.label_name)} ${original}</b><small>${esc(x.label_path)}</small></span></label>`}).join('')||'<div class=empty>没有可用候选Label</div>'}function renderCard''',
         template,
         flags=re.S,
     )
