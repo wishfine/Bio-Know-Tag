@@ -163,7 +163,7 @@ def patch_gold_only_template(template: str) -> str:
     )
     template = template.replace(
         '<span class=meta>${esc(q.unit_type)}</span>',
-        '<span class=meta>${q.unit_type===\'sub_question\'&&q.sub_question_number?`复合题第${q.sub_question_number}问`:q.unit_type===\'orphan_sub_question\'?\'缺失父题小题\':esc(q.unit_type)}</span>',
+        '<span class=meta>${q.sub_question_number?`复合题第${q.sub_question_number}问`:q.unit_type===\'orphan_sub_question\'?\'缺失父题小题\':esc(q.unit_type)}</span>',
     )
     template = re.sub(
         r"<span class=meta>\$\{q\.unit_type===.*?</span>",
@@ -174,7 +174,7 @@ def patch_gold_only_template(template: str) -> str:
     )
     template = template.replace(
         '<div class=body><div class=images>${imgs}</div>',
-        "<div class=body>${q.unit_type==='sub_question'&&q.sub_question_number?`<div class=sub-question-marker>复合题第${q.sub_question_number}问</div>`:q.unit_type==='orphan_sub_question'?'<div class=sub-question-marker>缺失父题小题</div>':''}<div class=images>${imgs}</div>",
+        "<div class=body>${q.sub_question_number?`<div class=sub-question-marker>复合题第${q.sub_question_number}问</div>`:q.unit_type==='orphan_sub_question'?'<div class=sub-question-marker>缺失父题小题</div>':''}<div class=images>${imgs}</div>",
     )
     # Do not label every selected row as a definition-ablation row.  The
     # recommended pool is mixed: some rows come from DS instability, some from
