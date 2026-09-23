@@ -35,16 +35,16 @@ for port in {9304..9311}; do
   ENDPOINTS+=("http://127.0.0.1:$port/v1/chat/completions")
 done
 
-QWEN_ABLATION_TOTAL_WORKERS=240 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
+QWEN_ABLATION_WORKERS_PER_ARM=60 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
   bash scripts/run_qwen_definition_ablation_arms.sh smoke "$RUN_ROOT" "$MODEL" "${ENDPOINTS[@]}"
 
-nohup env QWEN_ABLATION_TOTAL_WORKERS=240 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
+nohup env QWEN_ABLATION_WORKERS_PER_ARM=60 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
   bash scripts/run_qwen_definition_ablation_arms.sh full "$RUN_ROOT" "$MODEL" "${ENDPOINTS[@]}" \
   > "$RUN_ROOT/launcher.log" 2>&1 &
 printf '%s\n' "$!" > "$RUN_ROOT/launcher.pid"
 ```
 
-`smoke` 在独立子目录对每臂的前 30 对做同步解析检查。`full` 以 A→B→B→A 顺序逐臂运行，四臂共享同一批 9304–9311 服务；总 worker 数为 240，且每个端口同时在途请求不超过 30。这样避免不同实验臂同时争抢端口。高并发下应关注错误率和 vLLM 队列/显存；若服务出现错误，可停止并降低环境变量后在同一运行目录续跑。四臂全部报告 `processed=3257` 且 `error=0` 后分析：
+`smoke` 在独立子目录对每臂的前 30 对同时做解析检查。`full` 四臂也同时运行，每臂独占两个端口：`name_1`→9304/9305，`definition_1`→9306/9307，`name_2`→9308/9309，`definition_2`→9310/9311。每臂 60 worker，每个端口同时在途请求最多 30，总计最多 240。高并发下应关注错误率和 vLLM 队列/显存；若服务出现错误，可停止并降低环境变量后在同一运行目录续跑。由于四臂落在不同服务实例上，实例配置必须相同；对关键翻转还应做跨端口复核以排除服务差异。四臂全部报告 `processed=3257` 且 `error=0` 后分析：
 
 ```bash
 PYTHONPATH=src python scripts/analyze_definition_ablation_repeats.py \
