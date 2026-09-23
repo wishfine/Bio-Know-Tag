@@ -8,6 +8,7 @@ import random
 import re
 import threading
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -78,6 +79,7 @@ class DSClient:
         retry_delay: float = 0.25,
         request_interval: float = 0.0,
         enable_thinking: bool | None = None,
+        max_in_flight_per_endpoint: int | None = None,
     ) -> None:
         self.endpoints = [endpoint.rstrip("/") for endpoint in endpoints if endpoint]
         if not self.endpoints:
@@ -86,12 +88,19 @@ class DSClient:
             raise ValueError("retries must be at least 1")
         if request_interval < 0:
             raise ValueError("request_interval must be non-negative")
+        if max_in_flight_per_endpoint is not None and max_in_flight_per_endpoint < 1:
+            raise ValueError("max_in_flight_per_endpoint must be positive")
         self.model = model
         self.timeout = timeout
         self.retries = retries
         self.retry_delay = retry_delay
         self.request_interval = request_interval
         self.enable_thinking = enable_thinking
+        self.max_in_flight_per_endpoint = max_in_flight_per_endpoint
+        self._endpoint_slots = {
+            endpoint: threading.BoundedSemaphore(max_in_flight_per_endpoint)
+            for endpoint in set(self.endpoints)
+        } if max_in_flight_per_endpoint is not None else {}
         self._next_endpoint = 0
         self._endpoint_lock = threading.Lock()
         self._request_slot_lock = threading.Lock()
@@ -154,8 +163,10 @@ class DSClient:
             )
             try:
                 self._wait_for_request_slot()
-                with urlopen(request, timeout=self.timeout) as response:
-                    response_body = json.loads(response.read().decode("utf-8"))
+                slot = self._endpoint_slots.get(endpoint)
+                with slot if slot is not None else nullcontext():
+                    with urlopen(request, timeout=self.timeout) as response:
+                        response_body = json.loads(response.read().decode("utf-8"))
                 message = response_body["choices"][0]["message"]
                 content = message["content"]
                 if not isinstance(content, str) or not content.strip():

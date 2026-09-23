@@ -30,14 +30,21 @@ Qwen 服务必须先在服务器本机确认 `/v1/models` 可用。原服务预�
 ```bash
 RUN_ROOT="runtime/$(date +%Y%m%d-%H%M%S)-qwen-definition-ablation-v2"
 MODEL='Qwen3.8-27B'
-E1='http://127.0.0.1:9304/v1/chat/completions'
-E2='http://127.0.0.1:9305/v1/chat/completions'
+ENDPOINTS=()
+for port in {9304..9311}; do
+  ENDPOINTS+=("http://127.0.0.1:$port/v1/chat/completions")
+done
 
-bash scripts/run_qwen_definition_ablation_arms.sh smoke "$RUN_ROOT" "$MODEL" "$E1" "$E2"
-bash scripts/run_qwen_definition_ablation_arms.sh full "$RUN_ROOT" "$MODEL" "$E1" "$E2"
+QWEN_ABLATION_TOTAL_WORKERS=240 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
+  bash scripts/run_qwen_definition_ablation_arms.sh smoke "$RUN_ROOT" "$MODEL" "${ENDPOINTS[@]}"
+
+nohup env QWEN_ABLATION_TOTAL_WORKERS=240 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
+  bash scripts/run_qwen_definition_ablation_arms.sh full "$RUN_ROOT" "$MODEL" "${ENDPOINTS[@]}" \
+  > "$RUN_ROOT/launcher.log" 2>&1 &
+printf '%s\n' "$!" > "$RUN_ROOT/launcher.pid"
 ```
 
-`smoke` 在独立子目录对每臂的前 30 对做同步解析检查；`full` 在各自子目录后台运行，每臂 4 worker，共 16 worker。四臂全部报告 `processed=3257` 且 `error=0` 后分析：
+`smoke` 在独立子目录对每臂的前 30 对做同步解析检查。`full` 以 A→B→B→A 顺序逐臂运行，四臂共享同一批 9304–9311 服务；总 worker 数为 240，且每个端口同时在途请求不超过 30。这样避免不同实验臂同时争抢端口。高并发下应关注错误率和 vLLM 队列/显存；若服务出现错误，可停止并降低环境变量后在同一运行目录续跑。四臂全部报告 `processed=3257` 且 `error=0` 后分析：
 
 ```bash
 PYTHONPATH=src python scripts/analyze_definition_ablation_repeats.py \

@@ -277,6 +277,43 @@ def test_ds_client_spaces_concurrent_http_attempts():
     assert all(gap >= 0.025 for gap in gaps)
 
 
+def test_ds_client_caps_in_flight_requests_per_endpoint(monkeypatch):
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": '{"ok":true}'}}]}).encode()
+
+    def fake_urlopen(request, timeout):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return Response()
+
+    monkeypatch.setattr("bio_know_tag.ds.urlopen", fake_urlopen)
+    client = DSClient(
+        ["http://example.test/v1/chat/completions"],
+        "model",
+        retries=1,
+        max_in_flight_per_endpoint=2,
+    )
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        list(executor.map(lambda _: client.chat([{"role": "user", "content": "x"}]), range(10)))
+    assert peak == 2
+
+
 def test_validate_alignment_rejects_out_of_range_score():
     result = {
         "alignment_score": 6,

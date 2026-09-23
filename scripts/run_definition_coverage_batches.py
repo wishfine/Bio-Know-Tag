@@ -28,6 +28,7 @@ def main() -> int:
     parser.add_argument("--retries", type=int, default=3)
     parser.add_argument("--retry-delay", type=float, default=1)
     parser.add_argument("--request-interval", type=float, default=0)
+    parser.add_argument("--max-in-flight-per-endpoint", type=int)
     parser.add_argument("--limit", type=int)
     args = parser.parse_args()
     endpoints = args.endpoints or [value for value in (os.getenv("DS1"), os.getenv("DS2")) if value]
@@ -44,6 +45,7 @@ def main() -> int:
         retry_delay=args.retry_delay,
         request_interval=args.request_interval,
         enable_thinking=False,
+        max_in_flight_per_endpoint=args.max_in_flight_per_endpoint,
     )
     report = run_coverage_batches(
         args.tasks,
@@ -63,4 +65,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
