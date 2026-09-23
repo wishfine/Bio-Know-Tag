@@ -436,6 +436,22 @@ def test_run_hybrid_retrieval_writes_25_candidate_sidecar(tmp_path: Path):
     assert row["retrieval_version"] == "hybrid-v1-s18-d7-k25"
 
 
+def test_run_hybrid_retrieval_rejects_row_order_mismatch(tmp_path: Path):
+    sparse_path = tmp_path / "sparse.jsonl"
+    dense_path = tmp_path / "dense.jsonl"
+    sparse_path.write_text(
+        ''.join(json.dumps({"question_id": question_id, "candidates": []}) + "\n" for question_id in ("q1", "q2")),
+        encoding="utf-8",
+    )
+    dense_path.write_text(
+        ''.join(json.dumps({"question_id": question_id, "candidates": []}) + "\n" for question_id in ("q2", "q1")),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="question IDs differ at row 1"):
+        run_hybrid_retrieval(sparse_path, dense_path, tmp_path / "hybrid")
+    assert not (tmp_path / "hybrid" / "candidates.jsonl").exists()
+
+
 def test_candidate_reranking_unions_sparse_and_dense_before_top_k(tmp_path: Path):
     units_path = tmp_path / "units.jsonl"
     labels_path = tmp_path / "labels.jsonl"

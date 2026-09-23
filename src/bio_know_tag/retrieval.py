@@ -8,6 +8,7 @@ import re
 import hashlib
 from collections import Counter
 from datetime import datetime, timezone
+from itertools import zip_longest
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -1049,14 +1050,8 @@ def run_hybrid_retrieval(
     sparse_quota: int = 18,
     dense_quota: int = 7,
 ) -> dict[str, Any]:
-    sparse = {
-        str(row["question_id"]): row for row in _read_objects(sparse_candidates_path)
-    }
-    dense = {
-        str(row["question_id"]): row for row in _read_objects(dense_candidates_path)
-    }
-    if set(sparse) != set(dense):
-        raise ValueError("sparse and dense runs must contain identical question IDs")
+    # Both retrievers preserve the input-unit order. Streaming avoids retaining
+    # millions of 30-candidate rows from both runs in memory at full scale.
     output_dir = Path(run_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "candidates.jsonl"
@@ -1064,11 +1059,23 @@ def run_hybrid_retrieval(
     candidate_counts: Counter[str] = Counter()
     source_counts: Counter[str] = Counter()
     version = f"hybrid-v1-s{sparse_quota}-d{dense_quota}-k{top_k}"
+    processed = 0
     with temporary.open("w", encoding="utf-8", newline="\n") as output:
-        for question_id in sparse:
+        for index, (sparse_row, dense_row) in enumerate(
+            zip_longest(
+                _read_objects(sparse_candidates_path),
+                _read_objects(dense_candidates_path),
+            ),
+            1,
+        ):
+            if sparse_row is None or dense_row is None:
+                raise ValueError(f"sparse and dense candidate counts differ at row {index}")
+            question_id = str(sparse_row.get("question_id") or "")
+            if not question_id or question_id != str(dense_row.get("question_id") or ""):
+                raise ValueError(f"sparse and dense question IDs differ at row {index}")
             candidates = quota_fuse_candidates(
-                sparse[question_id].get("candidates") or [],
-                dense[question_id].get("candidates") or [],
+                sparse_row.get("candidates") or [],
+                dense_row.get("candidates") or [],
                 sparse_quota=sparse_quota,
                 dense_quota=dense_quota,
                 top_k=top_k,
@@ -1089,10 +1096,11 @@ def run_hybrid_retrieval(
                 )
             )
             output.write("\n")
+            processed += 1
     temporary.replace(output_path)
     report = {
-        "input": len(sparse),
-        "processed": len(sparse),
+        "input": processed,
+        "processed": processed,
         "error": 0,
         "top_k": top_k,
         "sparse_quota": sparse_quota,
