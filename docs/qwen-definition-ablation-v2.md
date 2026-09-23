@@ -1,5 +1,7 @@
 # Qwen 释义消融复现实验：旧实验核查与重复对照
 
+> 2026-09-23 第一轮四臂高并发运行没有完成：分别成功 1690、2377、1368、993 / 3257。主要失败为 HTTP 请求超时；四臂共同成功仅 943 对，且 929 对是高覆盖层，不能外推。诊断快照与数值见 [原释义消融分析文档](definition-ablation-analysis.md)。
+
 ## 旧实验到底做了什么
 
 旧数据位于 `runtime/20260921-184755-definition-ablation/`。它从已打旧 `knw_ids` 的独立题中，按当前 458 个 Label 各抽 5 或 10 道题，共 3,257 个题目–Label 对。若 Label 在此前 DS 正样本实验中的匹配率低于 0.70，目标抽 10 道，否则抽 5 道；每个 Label 优先取前一轮 DS 精排双策略输出不同的题，再用该 Label 的旧 ID 正样本补齐。因此这是刻意加重困难样本的诊断集，不是题库总体的随机样本。
@@ -23,7 +25,7 @@
 
 ## 运行前条件
 
-Qwen 服务必须先在服务器本机确认 `/v1/models` 可用。原服务预计为 9304 和 9305，实际端口和模型名以当前响应为准。旧样本和分析程序已打包于本机 `runtime/qwen-definition-ablation-input-v2.tar.gz`；这是固定实验输入，不应在复现中重新抽题。
+Qwen 服务必须先在服务器本机确认 9304–9311 的 `/v1/models` 可用，实际模型名以当前响应为准。旧样本和分析程序已打包于本机 `runtime/qwen-definition-ablation-input-v2.tar.gz`；这是固定实验输入，不应在复现中重新抽题。
 
 服务器同步代码与输入后，从仓库根目录执行：
 
@@ -35,16 +37,18 @@ for port in {9304..9311}; do
   ENDPOINTS+=("http://127.0.0.1:$port/v1/chat/completions")
 done
 
-QWEN_ABLATION_WORKERS_PER_ARM=60 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
+QWEN_ABLATION_WORKERS_PER_ARM=60 QWEN_ABLATION_PER_ENDPOINT_LIMIT=4 QWEN_ABLATION_TIMEOUT=1200 \
   bash scripts/run_qwen_definition_ablation_arms.sh smoke "$RUN_ROOT" "$MODEL" "${ENDPOINTS[@]}"
 
-nohup env QWEN_ABLATION_WORKERS_PER_ARM=60 QWEN_ABLATION_PER_ENDPOINT_LIMIT=30 \
+nohup env QWEN_ABLATION_WORKERS_PER_ARM=60 QWEN_ABLATION_PER_ENDPOINT_LIMIT=4 QWEN_ABLATION_TIMEOUT=1200 \
   bash scripts/run_qwen_definition_ablation_arms.sh full "$RUN_ROOT" "$MODEL" "${ENDPOINTS[@]}" \
   > "$RUN_ROOT/launcher.log" 2>&1 &
 printf '%s\n' "$!" > "$RUN_ROOT/launcher.pid"
 ```
 
-`smoke` 在独立子目录对每臂的前 30 对同时做解析检查。`full` 四臂也同时运行，每臂独占两个端口：`name_1`→9304/9305，`definition_1`→9306/9307，`name_2`→9308/9309，`definition_2`→9310/9311。每臂 60 worker，每个端口同时在途请求最多 30，总计最多 240。高并发下应关注错误率和 vLLM 队列/显存；若服务出现错误，可停止并降低环境变量后在同一运行目录续跑。由于四臂落在不同服务实例上，实例配置必须相同；对关键翻转还应做跨端口复核以排除服务差异。四臂全部报告 `processed=3257` 且 `error=0` 后分析：
+`smoke` 在独立子目录对每臂的前 30 对同时做解析检查。`full` 四臂也同时运行，每臂独占两个端口：`name_1`→9304/9305，`definition_1`→9306/9307，`name_2`→9308/9309，`definition_2`→9310/9311。每臂保持 60 个线程以匹配原运行清单，但每个端口同时在途请求最多 4，总计最多 32；超时提高到 1200 秒。由于四臂落在不同服务实例上，实例配置必须相同；对关键翻转还应做跨端口复核以排除服务差异。四臂全部报告 `processed=3257` 且 `error=0` 后分析：
+
+**恢复现有未完成运行**：`RUN_ROOT='runtime/20260923-145741-qwen-definition-ablation-v2'`，保留 `workers=60`、`max_batch_size=40`、`max_tokens=2048`，执行上面的 `full` launcher 命令即可；它只提交 `results.jsonl` 中尚未成功的任务，并把本次日志另存为 `resume-*.log`，不覆盖最初的失败日志和启动参数。续跑后要重新生成完整分析到新目录，勿覆盖 `analysis-partial`。剩余任务在恢复时可能组成不同批次，这种补齐适合探索，不是严格隔离批次效应的重复实验。
 
 ```bash
 PYTHONPATH=src python scripts/analyze_definition_ablation_repeats.py \

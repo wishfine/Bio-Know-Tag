@@ -15,6 +15,7 @@ endpoints=("$@")
 sample_root=${SAMPLE_ROOT:-runtime/20260921-184755-definition-ablation}
 workers=${QWEN_ABLATION_WORKERS_PER_ARM:-60}
 per_endpoint_limit=${QWEN_ABLATION_PER_ENDPOINT_LIMIT:-30}
+timeout=${QWEN_ABLATION_TIMEOUT:-600}
 
 if [[ $mode != smoke && $mode != full ]]; then
   echo "Mode must be smoke or full" >&2
@@ -25,8 +26,8 @@ for file in name_only_tasks.jsonl name_plus_definition_tasks.jsonl name_only_lab
   test -s "$sample_root/$file" || { echo "Missing $sample_root/$file" >&2; exit 1; }
 done
 
-if (( workers < 1 || per_endpoint_limit < 1 || workers > 2 * per_endpoint_limit )); then
-  echo "Worker and per-endpoint limits must be positive" >&2
+if (( workers < 1 || per_endpoint_limit < 1 || timeout < 1 )); then
+  echo "Worker, per-endpoint, and timeout limits must be positive" >&2
   exit 2
 fi
 if [[ $(printf '%s\n' "${endpoints[@]}" | sort -u | wc -l | tr -d ' ') -ne 8 ]]; then
@@ -43,15 +44,19 @@ for endpoint in "${endpoints[@]}"; do
 done
 
 mkdir -p "$run_root/$mode"
+parameters_path="$run_root/$mode/launch-parameters.txt"
+if [[ -e $parameters_path ]]; then
+  parameters_path="$run_root/$mode/resume-parameters-$(date +%Y%m%d-%H%M%S).txt"
+fi
 {
-  printf 'model=%s\nmode=%s\nworkers_per_arm=%s\nper_endpoint_limit=%s\n' \
-    "$model" "$mode" "$workers" "$per_endpoint_limit"
+  printf 'model=%s\nmode=%s\nworkers_per_arm=%s\nper_endpoint_limit=%s\ntimeout=%s\n' \
+    "$model" "$mode" "$workers" "$per_endpoint_limit" "$timeout"
   for index in 0 1 2 3; do
     arm=(name_1 definition_1 name_2 definition_2)
     printf '%s endpoint=%s endpoint=%s\n' \
       "${arm[$index]}" "${endpoints[$((2 * index))]}" "${endpoints[$((2 * index + 1))]}"
   done
-} > "$run_root/$mode/launch-parameters.txt"
+} > "$parameters_path"
 
 arms=(name_1 definition_1 name_2 definition_2)
 for arm in "${arms[@]}"; do
@@ -82,7 +87,7 @@ for index in 0 1 2 3; do
     --max-batch-size 40
     --char-budget 55000
     --max-tokens 2048
-    --timeout 600
+    --timeout "$timeout"
     --retries 3
     --retry-delay 1
     --request-interval 0
@@ -93,7 +98,11 @@ for index in 0 1 2 3; do
   if [[ $mode == smoke ]]; then
     env PYTHONPATH=src python -u "${args[@]}" --workers 2 --limit 30 > "$arm_dir/run.log" 2>&1 &
   else
-    env PYTHONPATH=src python -u "${args[@]}" --workers "$workers" > "$arm_dir/nohup.log" 2>&1 &
+    log_path="$arm_dir/nohup.log"
+    if [[ -e $log_path ]]; then
+      log_path="$arm_dir/resume-$(date +%Y%m%d-%H%M%S).log"
+    fi
+    env PYTHONPATH=src python -u "${args[@]}" --workers "$workers" > "$log_path" 2>&1 &
   fi
   printf '%s\n' "$!" > "$arm_dir/pid"
   pids+=("$!")
