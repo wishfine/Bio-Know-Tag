@@ -5,6 +5,8 @@ __pycache__/
 .venv/
 runtime/*
 !runtime/.gitkeep
+# Five-run stability JSON is a reproducible large experiment export.
+docs/ds-stability-five-run-analysis.json
 received/
 output/positive-review-by-label*/
 source/raw/*

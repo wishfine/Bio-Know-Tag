@@ -201,6 +201,11 @@ def main() -> int:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--labels", type=Path, default=Path("configs/labels.jsonl"))
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--json-output",
+        type=Path,
+        help="Path for the full JSON export (defaults to ignored runtime/)",
+    )
     parser.add_argument("--question-ranking-output", type=Path)
     parser.add_argument("--label-ranking-output", type=Path)
     parser.add_argument("--max-questions", type=int, default=30)
@@ -390,7 +395,8 @@ def main() -> int:
     label_ranking_output = args.label_ranking_output or args.output.parent / "ds-stability-label-ranking-458.md"
     write_question_ranking(question_ranking_output, all_question_records, labels, units)
     write_label_ranking(label_ranking_output, unstable_labels)
-    json_output = args.output.with_suffix(".json")
+    json_output = args.json_output or Path("runtime") / args.output.with_suffix(".json").name
+    json_output.parent.mkdir(parents=True, exist_ok=True)
     write_json_export(json_output, report, all_question_records, unstable_labels, labels, units)
     print(json.dumps({
         "output": str(args.output),
