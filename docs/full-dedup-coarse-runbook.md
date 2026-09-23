@@ -1,10 +1,10 @@
 # 生物去重全量：预处理与统一粗召回
 
-本阶段只生成数据与候选，不调用 Qwen 精排。输入是 `生物-20260914-dedup-s85.jsonl`：它已经是保留题目的原始 JSONL（1,681,314 行），不是重复簇映射。45 条补充生物题按 `question_id` 覆盖或追加；语义上可能仍与保留题重复，不能把它们当作经 s85 去重的记录。
+本阶段只生成数据与候选，不调用 Qwen 精排。唯一输入是 `生物-20260914-dedup-s85.jsonl`：这是已去重的原始题目 JSONL（1,681,314 行），按数据提供方的口径，其中不同 `question_id` 对应不同题目，不是重复簇映射。**不要再默认合并 `update-data/all.jsonl`**：追加独立来源的记录会使这份文件的去重保证不再适用于新集合。若以后要纳入未覆盖的更新题，应对合并后的全集重新去重并发布新版本，不能直接沿用本次 s85 版本名与结论。
 
 父题材料、小题、独立题进入**同一个** `retrieval_units.jsonl`，一起通过 BM25、Dense、Hybrid。父题材料单元只负责判断额外知识点；父题最终标签在精排后汇总为“小题标签并集 + 父题材料额外标签”。精排执行器现支持混合输入，但百万级运行须先分片，不能把整份统一输入直接交给一次性读入内存的执行器。
 
-## 1. 合并并预处理
+## 1. 直接预处理已去重文件
 
 在服务器仓库中执行。各阶段成功后再进入下一阶段，不要并行启动依赖任务。
 
@@ -13,24 +13,18 @@ cd /local_data/zhangyonglin/Bio-Know-Tag
 git pull --ff-only origin main
 
 DEDUP='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/question-dedup-20260918/生物-20260914-dedup-s85.jsonl'
-UPDATES='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/update-data/all.jsonl'
-MERGED='/local_data/zhangyonglin/data/bio-know-tag/biology.dedup-s85-with-updates.raw.jsonl'
 RUN="runtime/$(date +%Y%m%d-%H%M%S)-biology-dedup-s85-full-coarse"
-mkdir -p "$RUN"/{merge,preprocess,orphan,units,unified,sparse,dense,hybrid,image-audit}
+mkdir -p "$RUN"/{preprocess,orphan,units,unified,sparse,dense,hybrid,image-audit}
 printf '%s\n' "$RUN" > runtime/LATEST_DEDUP_S85_FULL_COARSE_RUN
 
-test -s "$DEDUP" && test -s "$UPDATES"
-PYTHONPATH=src python scripts/merge_question_updates.py \
-  --base "$DEDUP" --updates "$UPDATES" --subject 生物 \
-  --output "$MERGED" --report "$RUN/merge/report.json"
-python -m json.tool "$RUN/merge/report.json"
+test -s "$DEDUP"
 
 PYTHONPATH=src python scripts/preprocess_questions.py \
-  --input "$MERGED" --run-dir "$RUN/preprocess"
+  --input "$DEDUP" --run-dir "$RUN/preprocess"
 python -m json.tool "$RUN/preprocess/report.json"
 
 PYTHONPATH=src python scripts/audit_orphan_parents.py \
-  --raw "$MERGED" --processed "$RUN/preprocess/questions.jsonl" \
+  --raw "$DEDUP" --processed "$RUN/preprocess/questions.jsonl" \
   --run-dir "$RUN/orphan"
 python -m json.tool "$RUN/orphan/report.json"
 
@@ -48,7 +42,9 @@ PYTHONPATH=src python scripts/build_unified_retrieval_units.py \
 python -m json.tool "$RUN/unified/report.json"
 ```
 
-验收：`merge.base_rows=1681314`（源文件不变时）；`merge.output_rows=base_rows+new_rows_added`；预处理、父题审计、打标单元构建的 `error` 都必须为 0。`unified.retrieval_units` 必须等于 `retrieval_label_units+retrieval_parent_extra_units`。去重后父题可能不在保留集，重点检查 `orphan/report.json`，不要将合成的缺父题容器判标。
+验收：源文件 `wc -l` 为 1,681,314（提供方文件不变时）；预处理、父题审计、打标单元构建的 `error` 都必须为 0。`unified.retrieval_units` 必须等于 `retrieval_label_units+retrieval_parent_extra_units`。去重后父题可能不在保留集，重点检查 `orphan/report.json`，不要将合成的缺父题容器判标。
+
+若已按旧命令生成了 `merged.raw.jsonl`，这份合并后文件及其下游结果不能直接用于本次“已去重全量”实验；应新建运行目录，从上面的 `DEDUP` 原文件重新预处理。原始去重文件不受影响。
 
 `unified/content_review.jsonl` 列出无当前题干的单元；其中有选项/解析者保留并标记，`no_current_question_text` 者进入 `text_ineligible.jsonl`，不参加文本召回。预处理会移除 `<img>`，空 `stem` 不等于原题没有内容；需结合图片审计核查，不能据此删除原始题。图片 URL 只供审核，不会让纯文本模型看到图片。
 
