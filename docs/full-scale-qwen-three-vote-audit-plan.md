@@ -16,7 +16,7 @@
 
 先用 300–1,000 道分层题做端到端 smoke：检查 JSON 解析、候选映射、三次请求是否真的独立、父子题逻辑、图片/空题干标记和失败续跑。再扩到固定的万题校准集，最后跑全量。三次运行使用不同 run 目录，故障重试只填补失败题，不覆盖已成功响应。不同服务实例应使用相同模型文件、推理参数和模板；记录端口，分析服务实例效应。`temperature=0` 也不能假设输出完全确定。
 
-当前代码已能让父题材料、小题和独立题共用粗排输入，但既有精排执行器仍禁止把 `composite_parent_extra` 与其它单元混跑。阶段 1 前须修改该执行器并加混合单元测试、父题聚合测试；在此之前**不得直接启动全量 Qwen 三票**。
+精排执行器现支持 `composite_parent_extra` 与独立题、小题混跑，并按单元类型使用对应提示词；每条结果写入自己的 `prompt_version`。执行器仍一次性读入输入，因此百万级作业先用 `shard_adjudication_inputs.py` 按题号同步切分题目与候选，再逐片运行。上线前仍须用真实 Qwen 服务做混合题小样本烟测与父题并集校验；本地单元测试不等于服务已验证。
 
 **候选召回检查**：对每个单元记录 Top25、有效旧 ID、新增旧候选、最终候选序列、各 Label 来源和 rank。最终候选可能超过 25 个。三次 Qwen 必须使用完全相同的最终候选；若旧 ID 全在 Top25，最终候选应保持原 Top25 不变。增加候选与不增加候选的旧实验是敏感性证据，不构成本次投票的不同输入臂。
 
@@ -126,3 +126,63 @@ runtime/<full-qwen-run>/
 | 4. 发布 | 输出 accepted/review/blocked、父题并集与报告 | 盲测集通过，版本/证据可追溯；未解决题不进入高置信训练集 |
 
 **当前未定项**：异构 Judge 的具体模型、教师审核预算、可接受的错标率/漏标率目标、自动放行的业务范围（训练集还是线上标签）。这些需在阶段 2 结束前由项目方明确；本文的 1% 是建议的初始精度目标，不是已批准标准。
+
+## 11. 混合精排的已实现接口与烟测顺序
+
+以下命令是**服务就绪后的烟测模板**，不是已经执行的全量 Qwen 作业。确认 `RUN` 指向本次去重粗排目录，`MODEL` 必须采用服务 `/v1/models` 返回的准确名称。不要把全量统一输入直接交给 `run_candidate_adjudication.py`：该执行器按分片读入内存。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+RUN="$(cat runtime/LATEST_DEDUP_S85_FULL_COARSE_RUN)"
+FINE="$RUN/fine-prep"
+mkdir -p "$FINE/legacy"
+
+PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --candidates "$RUN/hybrid/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$FINE/legacy"
+
+PYTHONPATH=src python scripts/shard_adjudication_inputs.py \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --candidates "$FINE/legacy/candidates.jsonl" \
+  --run-dir "$FINE/sharded" --shard-size 10000
+
+python -m json.tool "$FINE/sharded/report.json" | head -n 40
+```
+
+切分器逐行核对题号，不允许题目和候选错位。先从分片中抽含父题材料、小题、独立题的少量样本，在**新的烟测目录**跑混合精排；不要把 `--limit` 用在全量输入上。烟测须核对三种单元的 prompt 内容、`prompt_version`、空父题额外标签、子题当前设问优先，以及同目录续跑不重发成功题。
+
+分片内的命令形态如下；这是**单次** Qwen 投票，另外两次需用 `run2`、`run3` 的独立目录重复，同一分片的题目与候选文件不变：
+
+```bash
+SHARD="$FINE/sharded/shards/00001"
+MODEL='请替换为 /v1/models 返回的模型名'
+ENDPOINT='http://127.0.0.1:9304/v1/chat/completions'
+PYTHONPATH=src python scripts/run_candidate_adjudication.py \
+  --units "$SHARD/units.jsonl" \
+  --candidates "$SHARD/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$SHARD/votes/run1" \
+  --endpoint "$ENDPOINT" --model "$MODEL" \
+  --workers 30 --timeout 600 --retries 3 --max-tokens 1024 \
+  --no-audited-exclusions
+```
+
+投票阶段不用已有的人工排除规则改写模型原始选择；已审定排除项在三票汇总后的决策层单独应用并留痕。这样分析时能区分“Qwen 原始选择”与“人工硬过滤”。
+
+单票所有分片都完成、每片 `report.json` 均为 `success=input` 且 `error=0` 后，才允许合并。合并器逐行复核题号和顺序，缺一条即失败，不产生表面完整的结果：
+
+```bash
+PYTHONPATH=src python scripts/merge_sharded_predictions.py \
+  --shard-root "$FINE/sharded" --vote-name run1 \
+  --output "$FINE/run1.predictions.jsonl"
+
+PYTHONPATH=src python scripts/aggregate_unified_parent_predictions.py \
+  --parent-aggregation "$RUN/unified/parent_aggregation.jsonl" \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --predictions "$FINE/run1.predictions.jsonl" \
+  --output "$FINE/run1.parent_aggregated.jsonl"
+```
+
+父题汇总在**同一份精排结果**里读取小题和父题材料，不需要独立父题精排作业。被文本过滤掉的小题或未完成预测会出现在父题的 `missing_child_question_ids`，该父题 `needs_review=true`、`usable_for_training=false`。这只是每一票的暂存父题并集；最终放行仍须按第 3–7 节完成三票及复核。

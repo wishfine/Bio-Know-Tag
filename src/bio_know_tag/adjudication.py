@@ -17,6 +17,8 @@ from bio_know_tag.retrieval import format_label_path
 
 
 PROMPT_VERSION = "candidate-adjudication-v9.1b-compact-hard-boundaries"
+PARENT_PROMPT_VERSION = "composite-parent-extra-v1"
+MIXED_PROMPT_VERSION = "candidate-adjudication-mixed-v1"
 CANDIDATE_ORDER_VERSION = "candidate-adjudication-v8.3-internal-reflection"
 
 
@@ -173,6 +175,25 @@ def build_adjudication_prompt(
         candidates,
         labels_by_id,
     )
+    if unit.get("unit_type") == "composite_parent_extra":
+        prompt = f"""你是严谨的高中生物知识点判标器。只判断复合题父题材料自身额外考查的知识点；不读取小题，小题的Label将由程序单独取并集。高精度优先，可以返回selected=[]。
+
+父题材料包括stem、options、answer_text和analysis。只有材料自身明确呈现、解释或要求运用的生物知识才可选中；仅作为故事背景、提到名词或与小题考点常见伴随出现的知识不得选中。父题中的图表、实验设计或因果关系只有在材料文字足以确定其具体知识点时才选；缺图导致无法可靠判断时设置context_insufficient=true。
+
+Label范围由label_name、label_path、definition与distinctions共同限定，distinctions为排除边界，core_concepts不能扩大范围。对象、任务、生命层级、实验目的不一致时拒绝。每个选中Label必须能指出父题材料中的直接证据；可以多选合理Label，但不可为了覆盖率附加邻近Label。旧knw_ids即使作为候选来源，也不是正确答案。
+
+若父题材料有明确额外考点而候选全不匹配，selected=[]且need_expand_recall=true；若没有可确定的额外考点，selected=[]且need_expand_recall=false。每个选中Label提供一条从父题材料复制的简短evidence；reason用1至2句话说明结论。
+
+父题材料：
+{json.dumps(question, ensure_ascii=False)}
+
+候选Label（顺序不代表正确性）：
+{json.dumps(candidate_cards, ensure_ascii=False)}
+
+只输出一个JSON对象：
+{{"selected":["C01"],"evidence":{{"C01":"父题材料原文"}},"context_insufficient":false,"need_expand_recall":false,"reason":"父题材料直接呈现……"}}
+不要输出Markdown或JSON之外的内容。"""
+        return prompt, code_map
     prompt = f"""你是严谨的高中生物知识点判标器。本任务高精度优先：错标的代价远高于漏标。可以少选、selected=[]或要求扩召；不得为提高覆盖率加入只是相关、同章节、上下位邻近、共享机制或常见伴随出现的Label。
 
 任务是判断：当前小题是否直接考查候选Label所定义的知识范围，而不是寻找所有相关知识。只输出简短结论，不输出详细思考过程。
@@ -302,8 +323,16 @@ def validate_adjudication_result(
     }
 
 
+def _prompt_version_for_unit(unit: dict[str, Any]) -> str:
+    return (
+        PARENT_PROMPT_VERSION
+        if unit.get("unit_type") == "composite_parent_extra"
+        else PROMPT_VERSION
+    )
+
+
 def _latest_success(
-    evidence_path: Path, *, prompt_version: str
+    evidence_path: Path, *, prompt_versions_by_id: dict[str, str]
 ) -> tuple[dict[str, dict[str, Any]], int]:
     latest: dict[str, dict[str, Any]] = {}
     rows = 0
@@ -312,7 +341,8 @@ def _latest_success(
     for record in _read_jsonl(evidence_path):
         rows += 1
         if (
-            record.get("prompt_version") == prompt_version
+            record.get("prompt_version")
+            == prompt_versions_by_id.get(str(record.get("question_id") or ""))
             and not record.get("error")
             and isinstance(record.get("parsed_response"), dict)
         ):
@@ -362,7 +392,25 @@ def run_adjudication(
     output_dir = Path(run_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = output_dir / "evidence.jsonl"
-    prompt_version = PROMPT_VERSION
+    unit_types = {str(unit.get("unit_type") or "") for unit in units}
+    prompt_version = (
+        PARENT_PROMPT_VERSION
+        if unit_types == {"composite_parent_extra"}
+        else MIXED_PROMPT_VERSION
+        if "composite_parent_extra" in unit_types
+        else PROMPT_VERSION
+    )
+    prompt_versions_by_id = {
+        str(unit["question_id"]): _prompt_version_for_unit(unit) for unit in units
+    }
+    prompt_versions_by_unit_type = {
+        unit_type: (
+            PARENT_PROMPT_VERSION
+            if unit_type == "composite_parent_extra"
+            else PROMPT_VERSION
+        )
+        for unit_type in sorted(unit_types)
+    }
     candidate_versions = sorted(
         {str(row.get("retrieval_version") or "") for row in candidate_rows.values()}
     )
@@ -399,13 +447,15 @@ def run_adjudication(
         if audited_exclusions_path is not None
         else None,
     }
+    if prompt_version == MIXED_PROMPT_VERSION:
+        manifest["prompt_versions_by_unit_type"] = prompt_versions_by_unit_type
     if enable_thinking is not None:
         manifest["chat_template_kwargs"] = {
             "enable_thinking": enable_thinking
         }
     _ensure_run_manifest(output_dir / "run_manifest.json", manifest)
     completed, evidence_rows = _latest_success(
-        evidence_path, prompt_version=prompt_version
+        evidence_path, prompt_versions_by_id=prompt_versions_by_id
     )
     requests_succeeded = 0
     requests_failed = 0
@@ -431,7 +481,7 @@ def run_adjudication(
         prompt, code_map = build_adjudication_prompt(unit, candidates, labels_by_id)
         record = {
             "stage": "candidate_adjudication",
-            "prompt_version": prompt_version,
+            "prompt_version": _prompt_version_for_unit(unit),
             "question_id": question_id,
             "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             "prompt_chars": len(prompt),
@@ -530,7 +580,7 @@ def run_adjudication(
             persist(executor.map(adjudicate, pending_units))
 
     completed, evidence_rows = _latest_success(
-        evidence_path, prompt_version=prompt_version
+        evidence_path, prompt_versions_by_id=prompt_versions_by_id
     )
     predictions_path = output_dir / "predictions.jsonl"
     temporary = predictions_path.with_name(f".{predictions_path.name}.tmp")
@@ -622,9 +672,15 @@ def run_adjudication(
             dropped_unknown_codes = parsed.get("unknown_selected_codes_dropped", [])
             unknown_selected_codes_dropped_count += len(dropped_unknown_codes)
             questions_with_unknown_selected_codes += int(bool(dropped_unknown_codes))
-            text_content_missing = not str(unit.get("stem") or "").strip() and not str(
-                unit.get("parent_stem") or ""
-            ).strip()
+            if unit.get("unit_type") == "composite_parent_extra":
+                text_content_missing = not any(
+                    str(unit.get(field) or "").strip()
+                    for field in ("stem", "options", "answer_text", "analysis")
+                )
+            else:
+                text_content_missing = not str(unit.get("stem") or "").strip() and not str(
+                    unit.get("parent_stem") or ""
+                ).strip()
             needs_review = bool(
                 parsed["need_expand_recall"]
                 or parsed["context_insufficient"]
@@ -670,7 +726,7 @@ def run_adjudication(
                     "retrieval_version", ""
                 ),
                 "model": model,
-                "prompt_version": prompt_version,
+                "prompt_version": _prompt_version_for_unit(unit),
             }
             output.write(
                 json.dumps(prediction, ensure_ascii=False, sort_keys=True)
@@ -825,6 +881,7 @@ def run_adjudication(
         "candidate_count_distribution": candidate_count_distribution,
         "model": model,
         "prompt_version": prompt_version,
+        "prompt_versions_by_unit_type": prompt_versions_by_unit_type,
     }
     _write_json_atomic(output_dir / "report.json", report)
     return report

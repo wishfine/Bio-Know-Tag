@@ -8,6 +8,7 @@ import pytest
 
 from bio_know_tag.adjudication import (
     PROMPT_VERSION,
+    PARENT_PROMPT_VERSION,
     apply_audited_exclusions,
     build_adjudication_prompt,
     load_audited_exclusions,
@@ -222,6 +223,59 @@ def test_adjudication_prompt_uses_short_codes_and_teacher_definitions():
     assert '"reason": "当前设问直接考查……"' in prompt
     assert '"none_of_candidates"' not in prompt
     assert '"missing_knowledge"' not in prompt
+
+
+def test_parent_extra_prompt_judges_parent_material_itself():
+    unit = {
+        **_unit(),
+        "question_id": "parent",
+        "unit_type": "composite_parent_extra",
+        "stem": "父题共同材料中的额外知识",
+        "answer_text": "",
+        "analysis": "",
+    }
+    prompt, _ = build_adjudication_prompt(unit, [_candidate(1)], {"L1": _label("L1", "标签一")})
+
+    assert "父题材料自身额外考查" in prompt
+    assert "不读取小题" in prompt
+    assert "父题共同材料中的额外知识" in prompt
+    assert "只判断当前小题" not in prompt
+
+
+def test_parent_extra_run_uses_separate_prompt_version(tmp_path: Path):
+    unit = {
+        **_unit(),
+        "question_id": "parent",
+        "unit_type": "composite_parent_extra",
+        "stem": "父题材料描述细胞渗透失水",
+        "answer_text": "",
+    }
+    labels = {"L1": _label("L1", "渗透作用")}
+    candidates = [_candidate(1)]
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    units_path.write_text(json.dumps(unit, ensure_ascii=False) + "\n", encoding="utf-8")
+    candidates_path.write_text(json.dumps({"question_id": "parent", "candidates": candidates}) + "\n", encoding="utf-8")
+    labels_path.write_text(json.dumps(labels["L1"], ensure_ascii=False) + "\n", encoding="utf-8")
+
+    class Response:
+        content = json.dumps({"reason": "父题材料直接描述渗透失水。", "selected": ["C01"], "evidence": {"C01": "细胞渗透失水"}, "need_expand_recall": False, "context_insufficient": False}, ensure_ascii=False)
+        endpoint = "fake"
+        attempts = 1
+        latency_seconds = 0.01
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            assert "父题材料自身额外考查" in messages[1]["content"]
+            return Response()
+
+    report = run_adjudication(units_path, candidates_path, labels_path, tmp_path / "run", Client(), model="fake")
+
+    prediction = json.loads((tmp_path / "run" / "predictions.jsonl").read_text(encoding="utf-8"))
+    assert report["prompt_version"] == PARENT_PROMPT_VERSION
+    assert prediction["unit_type"] == "composite_parent_extra"
+    assert prediction["selected_labels"][0]["label_id"] == "L1"
 
 
 def test_adjudication_prompt_deterministically_shuffles_candidate_positions():
