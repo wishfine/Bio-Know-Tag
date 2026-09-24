@@ -1,6 +1,6 @@
 # 高中生物全量精排：Qwen 三次投票与异构 Judge 复核方案
 
-状态：实验设计稿。本文规定判定口径、留痕和放行条件；**不代表**已经完成全量精排、教师校准或最终数据发布。适用范围为去重后的生物题库、当前 458 个 Label，以及独立题、小题、真实复合题父题材料。对应的数据与粗排准备见 [去重全量粗排手册](full-dedup-coarse-runbook.md)。
+状态：实验设计稿；三票流式执行器已写好，但**不代表**已经完成新服务端烟测、全量精排、教师校准或最终数据发布。适用范围为去重后的生物题库、当前 458 个 Label，以及独立题、小题、真实复合题父题材料。对应的数据与粗排准备见 [去重全量粗排手册](full-dedup-coarse-runbook.md)。
 
 ## 1. 已确定的决策
 
@@ -170,6 +170,46 @@ PYTHONPATH=src python scripts/run_candidate_adjudication.py \
 ```
 
 投票阶段不用已有的人工排除规则改写模型原始选择；已审定排除项在三票汇总后的决策层单独应用并留痕。这样分析时能区分“Qwen 原始选择”与“人工硬过滤”。
+
+### 三票并行流式执行（当前推荐）
+
+前面的旧单票命令只用于说明底层接口。正式使用 `run_qwen_three_votes.py`：对每个分片同时启动 `run1/run2/run3` 三个独立进程，每票 `30` 个 worker，即客户端最多 **90 个在途请求**；一片的三票结束后再推进下一片。三票共用同一题目/候选文件与 prompt，但各自独立请求、证据和续跑状态。任一票失败时控制器停止，重新执行同一命令会让底层精排器跳过已有成功题，只补缺失题。`--max-shards 1` 先做第一片连通性试验；正式全量再不传该参数。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+RUN='runtime/20260924-104413-biology-s85-reuse-preprocess'
+FINE="$RUN/fine-prep"
+mkdir -p "$FINE/legacy"
+
+PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --candidates "$RUN/hybrid/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$FINE/legacy"
+
+PYTHONPATH=src python scripts/shard_adjudication_inputs.py \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --candidates "$FINE/legacy/candidates.jsonl" \
+  --run-dir "$FINE/sharded" --shard-size 10000
+
+# 首片烟测：流式、三票并行，每票30，总上限90。
+PYTHONPATH=src python scripts/run_qwen_three_votes.py \
+  --shard-root "$FINE/sharded" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'qwen3.8-27b-fp8' \
+  --workers-per-vote 30 --max-tokens 1024 \
+  --timeout 600 --retries 3 --retry-delay 1 \
+  --max-shards 1
+
+# 检查第一片三票的报告；均应 success=input、error=0。
+for VOTE in run1 run2 run3; do
+  python -m json.tool "$FINE/sharded/shards/00001/votes/$VOTE/report.json"
+done
+
+# 确认烟测结果后，去掉 --max-shards 1，用同一命令续跑全量。
+```
+
+执行器固定 `temperature=0`，与之前 Qwen 10 万题的客户端保持一致；输出仍可能波动。没有默认传 `--disable-thinking`，保持先前 Qwen 运行方式；如果新 FP8 服务返回空 content / 仅 reasoning，应另起新运行版本用 `--disable-thinking` 试验，不能在已有三票目录中途切换。客户端不负责开启 vLLM prefix cache，它必须在 **9204 服务端**以 `--enable-prefix-caching` 启动。先检查服务启动日志包含 `enable_prefix_caching=True`；否则请求仍可完成，但不应宣称“已开前缀缓存”。三票同题使用完全相同输入，有利于服务端复用前缀。`three_vote_manifest.json` 固定输入分片清单 SHA、Label SHA、模型/端口、参数、并发和流式开关，续跑配置不一致会停止。
 
 单票所有分片都完成、每片 `report.json` 均为 `success=input` 且 `error=0` 后，才允许合并。合并器逐行复核题号和顺序，缺一条即失败，不产生表面完整的结果：
 
