@@ -1,24 +1,24 @@
-# 高中生物全量精排：Qwen 三次投票与异构 Judge 复核方案
+# 高中生物全量精排：Qwen 与 DS 各三票方案
 
-状态：实验设计稿；三票流式执行器已写好，但**不代表**已经完成新服务端烟测、全量精排、教师校准或最终数据发布。适用范围为去重后的生物题库、当前 458 个 Label，以及独立题、小题、真实复合题父题材料。对应的数据与粗排准备见 [去重全量粗排手册](full-dedup-coarse-runbook.md)。
+状态：六票流式执行器已写好，下游双模型裁决规则仍是设计稿；**不代表**已经完成新服务端烟测、全量精排、教师校准或最终数据发布。适用范围为去重后的生物题库、当前 458 个 Label，以及独立题、小题、真实复合题父题材料。对应的数据与粗排准备见 [去重全量粗排手册](full-dedup-coarse-runbook.md)。
 
 ## 1. 已确定的决策
 
 1. 全量精排只使用一套候选：`Hybrid Top25 + 当前458目录中有效的旧 knw_ids`。旧 ID 只补充候选，不在提示词中注明“这是旧标签”，也不作为正确性依据。无效/过期 ID 不补入。
-2. 每个判标单元由 **Qwen3.8-27B 独立请求三次**。三次使用同一题目、同一候选及顺序、同一 Label 卡、同一 prompt 和同一解析规则。保存三次原始响应，不能只保存多数票集合。
-3. 后续可使用**不同模型家族**作 Judge。具体模型和版本在启动前固定、做小样本校准；Judge 不算 Qwen 的第四票，也不能看到旧标签、三次票数或先前 DS 判别结论。
+2. 每个判标单元由 **Qwen3.8-27B-FP8 三次＋DS-V4-Flash 三次**独立请求；六次共享题目、候选及顺序、Label 卡和按题型区分的 prompt。Qwen 和 DS 各自统计 `0/3–3/3`，保留每次原始响应，不能合成简单六票多数。
+3. 后续若用 Judge，须是**不在这六票内的独立模型或教师**；DS 已是投票模型，不能再把同一 DS 当作异构复核。Judge 的具体模型和版本在启动前固定、做小样本校准；不得看到旧标签、两模型票数或先前 DS 判别结论。
 4. 错标成本高于漏标。投票是稳定性证据，不是正确性证据；旧 `knw_ids` 是弱监督，不是金标；DS 对旧标签的 match 率是分层信号，不是逐题正确概率。
 5. 自动放行不是仅凭规则立刻启用：先通过独立教师样本验证该层的错标与漏标风险，再启用该层的自动放行。
 
 ## 2. 输入冻结与运行前检查
 
-为每次全量作业保存不可变 `run_manifest`：作为唯一题目源的 s85 去重文件 SHA-256、预处理版本、Label 文件 SHA-256、候选文件 SHA-256、候选构造版本、Qwen 模型权重/服务版本、prompt 版本、采样参数、temperature、seed（若服务支持）、端口、并发、输出预算、代码 commit。不能在该输入后直接追加 `update-data`，否则需重新去重并另起数据版本。三次运行的题目和候选行须逐题核对 ID、候选 ID **及顺序**，不一致者不能互投。
+为每次全量作业保存不可变 `run_manifest`：作为唯一题目源的 s85 去重文件 SHA-256、预处理版本、Label 文件 SHA-256、候选文件 SHA-256、候选构造版本、两个模型的权重/服务版本、prompt 版本、采样参数、temperature、seed（若服务支持）、端口、并发、输出预算、代码 commit。不能在该输入后直接追加 `update-data`，否则需重新去重并另起数据版本。六次运行的题目和候选行须逐题核对 ID、候选 ID **及顺序**，不一致者不能互投。
 
-先用 300–1,000 道分层题做端到端 smoke：检查 JSON 解析、候选映射、三次请求是否真的独立、父子题逻辑、图片/空题干标记和失败续跑。再扩到固定的万题校准集，最后跑全量。三次运行使用不同 run 目录，故障重试只填补失败题，不覆盖已成功响应。不同服务实例应使用相同模型文件、推理参数和模板；记录端口，分析服务实例效应。`temperature=0` 也不能假设输出完全确定。
+先用 300–1,000 道分层题做端到端 smoke：检查 JSON 解析、候选映射、六次请求是否真的独立、父子题逻辑、图片/空题干标记和失败续跑。再扩到固定的万题校准集，最后跑全量。六次运行使用不同 run 目录，故障重试只填补失败题，不覆盖已成功响应。记录各服务端口和模型精确 ID，分析服务实例效应。`temperature=0` 也不能假设输出完全确定。
 
 精排执行器现支持 `composite_parent_extra` 与独立题、小题混跑，并按单元类型使用对应提示词；每条结果写入自己的 `prompt_version`。执行器仍一次性读入输入，因此百万级作业先用 `shard_adjudication_inputs.py` 按题号同步切分题目与候选，再逐片运行。上线前仍须用真实 Qwen 服务做混合题小样本烟测与父题并集校验；本地单元测试不等于服务已验证。
 
-**候选召回检查**：对每个单元记录 Top25、有效旧 ID、新增旧候选、最终候选序列、各 Label 来源和 rank。最终候选可能超过 25 个。三次 Qwen 必须使用完全相同的最终候选；若旧 ID 全在 Top25，最终候选应保持原 Top25 不变。增加候选与不增加候选的旧实验是敏感性证据，不构成本次投票的不同输入臂。
+**候选召回检查**：对每个单元记录 Top25、有效旧 ID、新增旧候选、最终候选序列、各 Label 来源和 rank。最终候选可能超过 25 个。六票必须使用完全相同的最终候选；若旧 ID 全在 Top25，最终候选应保持原 Top25 不变。增加候选与不增加候选的旧实验是敏感性证据，不构成本次投票的不同输入臂。
 
 ## 3. 判标单元与投票定义
 
@@ -28,7 +28,7 @@
 - 小题：当前小题为唯一判标对象；父题公共材料仅用于补全指代。不能把父题或其他小题的考点自动迁入当前小题。
 - 真实复合题父题材料：仅判断公共材料自身能够明确支持的**额外** Label；允许空集合。最终父题 Label 在精排后汇总为 `各小题最终 Label 并集 ∪ 父题材料额外 Label`，并保留来源。任一小题或父题材料的裁决尚未完成时，只能输出带缺失/争议标记的暂存并集，父题整体不得进入 `accepted` 或训练集。合成的缺父题容器不单独判标。
 
-每次精排输出一个 Label 集合 `S1(q), S2(q), S3(q)`。对本题的**最终候选集合**（含补入的有效旧 ID）中的每个 Label `l` 计算 `votes(q,l) = Σ 1[l∈Si(q)]`，即 `0/3、1/3、2/3、3/3`；候选外 Label 不硬算为 `0/3`，另走召回审计。这样 `0/3` 旧 Label 确实是三次都见过却未选择，而不是根本没给模型看。另记录整题三个集合是否完全一致、两两 Jaccard、只有新增/只有删除/同数替换、空集合次数。**多标签题按每个 Label 投票**；即使整题集合三次都不同，某个核心 Label 仍可能是 `3/3`。若任何一次请求失败，该题为 `INCOMPLETE`，不能把失败当作反对票。
+每个模型各输出三个 Label 集合。对本题的**最终候选集合**（含补入的有效旧 ID）中的每个 Label `l`，分别计算 `qwen_votes(q,l)` 与 `ds_votes(q,l)`，各为 `0/3、1/3、2/3、3/3`；候选外 Label 不硬算为 `0/3`，另走召回审计。两个模型的票数不得直接相加为六票多数。另记录各模型整题三个集合是否完全一致、两两 Jaccard、只有新增/只有删除/同数替换、空集合次数。**多标签题按每个 Label 投票**。若任一请求失败，该题为 `INCOMPLETE`，不能把失败当作反对票。
 
 与旧标签的关系另算：`相等 / 新结果包含旧集 / 新结果是旧集子集 / 双向增减 / 完全不相交 / 无有效旧ID`。旧标签要先映射到当前 458 Label；过期 ID 单列。对每个旧 Label 再记录它的 Qwen 票数；对每个新选 Label 记录是否本来就在旧标签集，不能只用整题的“旧标一致/不一致”。
 
@@ -50,7 +50,7 @@
 
 ## 5. 异构 Judge 的任务与防锚定
 
-异构 Judge 是逐题–Label 核验器，不是重跑同一 Qwen prompt 的“第四票”。优先以另一模型家族/服务完成，固定模型版本。输入包括当前判标单元的可见题目文本、必要的父题指代背景、目标 Label 名称/路径及四字段释义；可提供少量最相邻 Label 作辨析，但**不提供**旧 `knw_ids`、Qwen 三次票数、投票结论、候选来源标记和 DS 旧判断。Judge 任务池包括：全部 `2/3` 分歧 Label、高风险 `3/3` Label，以及按风险分层抽出的 `1/3` 和 `0/3` 漏标候选；低风险 `3/3` 另以教师随机抽样校准。只审当前候选集合会漏掉召回失败；另有候选外补标审计。
+异构 Judge 是逐题–Label 核验器，不是重跑 Qwen 或 DS 六票之一。若启用模型 Judge，须使用第三个已校准的模型家族/服务，或交教师复核；不能把已参与三票的 DS 当成独立 Judge。输入包括当前判标单元的可见题目文本、必要的父题指代背景、目标 Label 名称/路径及四字段释义；可提供少量最相邻 Label 作辨析，但**不提供**旧 `knw_ids`、两模型票数、投票结论、候选来源标记和先前判别结论。Judge 任务池包括两模型冲突、任一模型的分歧 Label，以及按风险分层抽出的漏标候选。只审当前候选集合会漏掉召回失败；另有候选外补标审计。
 
 Judge 输出：`直接匹配 / 合理共标 / 不应打标 / 内容不足 / 释义或图谱冲突 / 候选外需补标`，附题目原文证据、当前设问、Label 定义边界、反证、置信度和机器可解析错误码。引用应可在原题文本中核验；引用失败不自动放行。Judge 认为“不应打标”且与高票 Qwen 冲突，或认为“需补标”却不在候选中，进入老师审核/召回修复，不让 Judge 单方面覆盖全部票数。
 
@@ -58,7 +58,7 @@ Judge 输出：`直接匹配 / 合理共标 / 不应打标 / 内容不足 / 释�
 
 ## 6. 逐 Label 决策矩阵（初始规则）
 
-表中 `AUTO_CANDIDATE` 仅为**待校准的自动放行候选层**，不是未经审核的金标。所有层都保留不可覆盖的原始三票；规则以后调整时从原始证据重算。
+下表是原先 Qwen 单模型三票的**风险分层参考**，不是新六票自动裁决器；新流程必须同时保留 Qwen 和 DS 各三票，在教师校准前不得据此表自动放行。`AUTO_CANDIDATE` 仅为待校准层，不是金标。两模型冲突题直接进入复核，不用简单六票多数决定。
 
 | Qwen票数/情况 | 旧标签与风险 | 下一步 | 初始状态 |
 |---|---|---|---|
@@ -101,9 +101,8 @@ runtime/<full-qwen-run>/
   manifest.json
   input/units.jsonl
   input/candidates-top25-plus-legacy.jsonl
-  votes/run1/evidence.jsonl, predictions.jsonl, report.json
-  votes/run2/evidence.jsonl, predictions.jsonl, report.json
-  votes/run3/evidence.jsonl, predictions.jsonl, report.json
+  shards/<id>/votes/{qwen1,qwen2,qwen3}/evidence.jsonl, predictions.jsonl, report.json
+  shards/<id>/votes/{ds1,ds2,ds3}/evidence.jsonl, predictions.jsonl, report.json
   analysis/per_question.jsonl
   analysis/per_question_label.jsonl
   analysis/per_label.jsonl
@@ -122,7 +121,7 @@ runtime/<full-qwen-run>/
 | 0. 固定输入 | 直接使用 s85 去重文件、统一粗排、Top25+旧ID、父子题/图片审计 | 输入 SHA、行数和候选映射一致；粗排无缺行 |
 | 1. 小规模通路 | 300–1,000 题独立三票，失败续跑、父题并集、逐Label投票 | 三次输入逐题同哈希；输出解析/ID映射正确 |
 | 2. 校准 | 万题运行，异构Judge小样本评估，教师分层盲审 | 决策规则和放行门槛冻结，主要高风险层有足够证据 |
-| 3. 全量 | Qwen三票、逐Label投票、Judge分流、老师队列 | 三票成功率、漏标/错标抽检达到预设门槛；异常层不放行 |
+| 3. 全量 | Qwen三票＋DS三票、分别逐Label计票、跨模型冲突分流、老师队列 | 六票成功率、漏标/错标抽检达到预设门槛；异常层不放行 |
 | 4. 发布 | 输出 accepted/review/blocked、父题并集与报告 | 盲测集通过，版本/证据可追溯；未解决题不进入高置信训练集 |
 
 **当前未定项**：异构 Judge 的具体模型、教师审核预算、可接受的错标率/漏标率目标、自动放行的业务范围（训练集还是线上标签）。这些需在阶段 2 结束前由项目方明确；本文的 1% 是建议的初始精度目标，不是已批准标准。
@@ -171,7 +170,7 @@ PYTHONPATH=src python scripts/run_candidate_adjudication.py \
 
 投票阶段不用已有的人工排除规则改写模型原始选择；已审定排除项在三票汇总后的决策层单独应用并留痕。这样分析时能区分“Qwen 原始选择”与“人工硬过滤”。
 
-### 三票并行流式执行（当前推荐）
+### 单模型三票并行流式执行（保留作单模型对照）
 
 前面的旧单票命令只用于说明底层接口。正式使用 `run_qwen_three_votes.py`：对每个分片同时启动 `run1/run2/run3` 三个独立进程，每票 `30` 个 worker，即客户端最多 **90 个在途请求**；一片的三票结束后再推进下一片。三票共用同一题目/候选文件与 prompt，但各自独立请求、证据和续跑状态。任一票失败时控制器停止，重新执行同一命令会让底层精排器跳过已有成功题，只补缺失题。`--max-shards 1` 先做第一片连通性试验；正式全量再不传该参数。
 
@@ -211,18 +210,58 @@ done
 
 执行器固定 `temperature=0`，与之前 Qwen 10 万题的客户端保持一致；输出仍可能波动。没有默认传 `--disable-thinking`，保持先前 Qwen 运行方式；如果新 FP8 服务返回空 content / 仅 reasoning，应另起新运行版本用 `--disable-thinking` 试验，不能在已有三票目录中途切换。客户端不负责开启 vLLM prefix cache，它必须在 **9204 服务端**以 `--enable-prefix-caching` 启动。先检查服务启动日志包含 `enable_prefix_caching=True`；否则请求仍可完成，但不应宣称“已开前缀缓存”。三票同题使用完全相同输入，有利于服务端复用前缀。`three_vote_manifest.json` 固定输入分片清单 SHA、Label SHA、模型/端口、参数、并发和流式开关，续跑配置不一致会停止。
 
+### 六票并行：Qwen 三次＋DS 三次（已确定的新方案）
+
+这替代上面的 Qwen 单模型三票执行命令，**不要两个控制器同时跑同一分片**。单个控制器在每个分片上先启动全部 6 票：`qwen1–3` 各 25 worker 打 9204、`ds1–3` 各 25 worker 打 9205；两服务各最多 75 个在途请求，客户端总上限 150。每票使用同一份 Top25＋有效旧 `knw_ids` 候选和同一套按题型区分的提示词，`temperature=0`，流式返回。Qwen 保留前述全量配置：`max_tokens=1024, timeout=600, retries=3`；DS 沿用此前 10 万题的 `max_tokens=512, timeout=300, retries=5`；两者 `retry_delay=1`、无请求间隔、不显式改 thinking 模式、不在投票阶段应用人工排除。两个模型的票数分别保存，**不合成六票多数**。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+RUN='runtime/20260924-104413-biology-s85-reuse-preprocess'
+FINE="$RUN/fine-prep"
+
+# 先确认两个服务实际返回的模型 ID；若 9205 ID 不等于 ds-v4-flash，
+# 将下面 --ds-model 改为 /v1/models 显示的精确值。
+curl -fsS http://172.22.0.35:9204/v1/models
+curl -fsS http://172.22.0.35:9205/v1/models
+
+# 如果上述候选/分片还没有构建，先执行上节的 augment 与 shard 两步。
+test -s "$FINE/sharded/report.json"
+test -s "$FINE/sharded/shards/00001/units.jsonl"
+test -s "$FINE/sharded/shards/00001/candidates.jsonl"
+
+# 烟测第一片：六票全部并行，分别保存。
+PYTHONPATH=src python scripts/run_qwen_ds_six_votes.py \
+  --shard-root "$FINE/sharded" \
+  --qwen-endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --qwen-model 'qwen3.8-27b-fp8' \
+  --ds-endpoint 'http://172.22.0.35:9205/v1/chat/completions' \
+  --ds-model 'ds-v4-flash' \
+  --workers-per-vote 25 \
+  --max-shards 1
+
+for VOTE in qwen1 qwen2 qwen3 ds1 ds2 ds3; do
+  python -m json.tool "$FINE/sharded/shards/00001/votes/$VOTE/report.json"
+done
+
+# 六份首片报告都 success=input、error=0 后，用同一命令去掉
+# --max-shards 1 续跑全部分片。不要新建第二个 shard-root。
+```
+
+六票结果位于 `shards/<id>/votes/{qwen1,qwen2,qwen3,ds1,ds2,ds3}`，各有 `runner.log/evidence.jsonl/predictions.jsonl/report.json/run_manifest.json`。控制器有独占锁防止重复全量启动，`six_vote_manifest.json` 固定两个模型的 ID、端口、分片/Label SHA、每票并发和请求参数；`Ctrl-C` 或给**控制器**发 `SIGTERM` 时会先停并回收六个子进程，再释放锁。若中断留下未完成的证据末行，续跑前会将原字节保存为 `evidence.incomplete-tail.*.bin` 并从 JSONL 移除该残行；已完整落盘的成功题不重发。`SIGKILL` 无法被捕捉，不要在进程未退出时启动第二个控制器。首片任一票失败会停止进入下一片，先看对应 `runner.log`，修复服务或输出问题后重试。两个模型各自的前缀缓存须在 **服务端**开启，客户端不能代开；核对 9204 与 9205 的服务启动日志。完成后使用 `merge_sharded_predictions.py --vote-name qwen1` 等六次分别合并，不要用旧 `run1–3` 名称。
+
 单票所有分片都完成、每片 `report.json` 均为 `success=input` 且 `error=0` 后，才允许合并。合并器逐行复核题号和顺序，缺一条即失败，不产生表面完整的结果：
 
 ```bash
 PYTHONPATH=src python scripts/merge_sharded_predictions.py \
-  --shard-root "$FINE/sharded" --vote-name run1 \
-  --output "$FINE/run1.predictions.jsonl"
+  --shard-root "$FINE/sharded" --vote-name qwen1 \
+  --output "$FINE/qwen1.predictions.jsonl"
 
 PYTHONPATH=src python scripts/aggregate_unified_parent_predictions.py \
   --parent-aggregation "$RUN/unified/parent_aggregation.jsonl" \
   --units "$RUN/unified/retrieval_units.jsonl" \
-  --predictions "$FINE/run1.predictions.jsonl" \
-  --output "$FINE/run1.parent_aggregated.jsonl"
+  --predictions "$FINE/qwen1.predictions.jsonl" \
+  --output "$FINE/qwen1.parent_aggregated.jsonl"
 ```
 
-父题汇总在**同一份精排结果**里读取小题和父题材料，不需要独立父题精排作业。被文本过滤掉的小题或未完成预测会出现在父题的 `missing_child_question_ids`，该父题 `needs_review=true`、`usable_for_training=false`。这只是每一票的暂存父题并集；最终放行仍须按第 3–7 节完成三票及复核。
+其余五票用各自的 `--vote-name`、输出路径重复合并。父题汇总在**同一票的精排结果**里读取小题和父题材料，不需要独立父题精排作业。被文本过滤掉的小题或未完成预测会出现在父题的 `missing_child_question_ids`，该父题 `needs_review=true`、`usable_for_training=false`。这只是每一票的暂存父题并集；最终放行仍须同时考虑两个模型的各三票与教师校准。
