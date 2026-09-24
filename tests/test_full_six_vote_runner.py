@@ -81,3 +81,38 @@ def test_full_six_votes_stops_others_on_first_failure(tmp_path: Path, monkeypatc
     with pytest.raises(RuntimeError, match="incomplete vote ds1"):
         run_full_six_votes(units, candidates, labels, tmp_path / "output", preflight=False)
     assert all(process.terminated for process in processes if process.vote != "ds1")
+
+
+def test_full_six_votes_disables_thinking_for_both_models(tmp_path: Path, monkeypatch):
+    units, candidates, labels = _inputs(tmp_path)
+    commands = []
+
+    class Process:
+        def __init__(self, command, **kwargs):
+            commands.append(command)
+        def poll(self):
+            return 0
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr("bio_know_tag.full_six_vote_runner.subprocess.Popen", Process)
+    output = tmp_path / "new-adjudication"
+    run_full_six_votes(units, candidates, labels, output, preflight=False)
+    qwen = [command for command in commands if Path(command[command.index("--run-dir") + 1]).name.startswith("qwen")]
+    ds = [command for command in commands if Path(command[command.index("--run-dir") + 1]).name.startswith("ds")]
+    assert len(qwen) == len(ds) == 3
+    assert all("--disable-thinking" in command for command in qwen)
+    assert all("--disable-thinking" in command for command in ds)
+    assert all(Path(command[command.index("--run-dir") + 1]).parent == output / "votes" for command in ds)
+    assert all(Path(command[command.index("--run-dir") + 1]).parent == output / "votes" for command in qwen)
+    manifest = json.loads((output / "run_manifest.json").read_text())
+    assert manifest["thinking_override"] == {"qwen": False, "ds": False}
+
+
+def test_full_six_votes_refuses_old_manifest_with_unspecified_thinking(tmp_path: Path):
+    units, candidates, labels = _inputs(tmp_path)
+    output = tmp_path / "output"
+    output.mkdir()
+    (output / "run_manifest.json").write_text('{"thinking_override":null}', encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest mismatch"):
+        run_full_six_votes(units, candidates, labels, output, preflight=False)

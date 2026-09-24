@@ -4,7 +4,7 @@
 
 ## 当前执行入口：不切片，直接读取全量文件
 
-按最新决定，正式运行**不需要**先执行 `shard_adjudication_inputs.py`。旧分片命令保留在文末作历史对照，不用于本轮。全量精排器逐行读取同一份题目与 `Top25 + 当前458目录内有效旧 knw_ids` 候选，先检查整份输入题号/顺序，再以有界队列发送请求；每票有独立 `votes/<name>` 目录和 SQLite 续跑索引，不将 168 万题及候选一次性读入内存，也不产生分片文件。六票同时启动，每票 25 并发，两服务各至多 75，总计 150。Qwen 与 DS 都固定 `temperature=0`、`stream=true`、`max_tokens=1024`、最多 5 次 HTTP 尝试；Qwen 超时 600 秒、DS 超时 300 秒。`max_tokens` 是输出长度上限，不限制输入长度。运行中仍应关注各票 `runner.log` 的 `finish_reason=length` 和 JSON 失败情况；失败题续跑，不把截断结果当正确输出。
+按最新决定，正式运行**不需要**先执行 `shard_adjudication_inputs.py`。旧分片命令保留在文末作历史对照，不用于本轮。全量精排器逐行读取同一份题目与 `Top25 + 当前458目录内有效旧 knw_ids` 候选，先检查整份输入题号/顺序，再以有界队列发送请求；每票有独立 `votes/<name>` 目录和 SQLite 续跑索引，不将 168 万题及候选一次性读入内存，也不产生分片文件。六票同时启动，每票 25 并发，两服务各至多 75，总计 150。Qwen 与 DS 都固定 `temperature=0`、`stream=true`、**`chat_template_kwargs.enable_thinking=false`**、`max_tokens=1024`、最多 5 次 HTTP 尝试；Qwen 超时 600 秒、DS 超时 300 秒。`max_tokens` 是输出长度上限，不限制输入长度。运行中仍应关注各票 `runner.log` 的 `finish_reason=length` 和 JSON 失败情况；失败题续跑，不把截断结果当正确输出。旧版未显式关闭 thinking 的结果目录不可与本轮混用。
 
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
@@ -21,13 +21,34 @@ PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
   --run-dir "$FINE/legacy"
 python -m json.tool "$FINE/legacy/report.json"
 
+# 先在新目录跑 30 题端到端烟测；两票都必须 success=30、error=0，
+# 且 evidence 中不再出现大面积 finish_reason=length，才启动全量。
+SMOKE="$FINE/smoke-no-thinking"
+mkdir -p "$SMOKE"
+head -n 30 "$RUN/unified/retrieval_units.jsonl" > "$SMOKE/units.jsonl"
+head -n 30 "$FINE/legacy/candidates.jsonl" > "$SMOKE/candidates.jsonl"
+PYTHONPATH=src python scripts/run_candidate_adjudication_full.py \
+  --units "$SMOKE/units.jsonl" --candidates "$SMOKE/candidates.jsonl" \
+  --labels configs/labels.jsonl --run-dir "$SMOKE/qwen" \
+  --endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --model 'qwen3.8-27b-fp8' --workers 5 --max-tokens 1024 \
+  --timeout 600 --retries 5 --disable-thinking
+PYTHONPATH=src python scripts/run_candidate_adjudication_full.py \
+  --units "$SMOKE/units.jsonl" --candidates "$SMOKE/candidates.jsonl" \
+  --labels configs/labels.jsonl --run-dir "$SMOKE/ds" \
+  --endpoint 'http://172.22.0.35:9205/v1/chat/completions' \
+  --model 'ds-v4-flash' --workers 5 --max-tokens 1024 \
+  --timeout 300 --retries 5 --disable-thinking
+python -m json.tool "$SMOKE/qwen/report.json"
+python -m json.tool "$SMOKE/ds/report.json"
+
 # 若 /v1/models 的实际模型 ID 与下方不一致，按服务返回值修改；
 # 启动后不可在同一结果目录中途改模型、候选或请求参数。
 PYTHONPATH=src python scripts/run_qwen_ds_six_votes_full.py \
   --units "$RUN/unified/retrieval_units.jsonl" \
   --candidates "$FINE/legacy/candidates.jsonl" \
   --labels configs/labels.jsonl \
-  --run-dir "$FINE/adjudication" \
+  --run-dir "$FINE/adjudication-no-thinking" \
   --qwen-endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
   --qwen-model 'qwen3.8-27b-fp8' \
   --ds-endpoint 'http://172.22.0.35:9205/v1/chat/completions' \
@@ -35,7 +56,7 @@ PYTHONPATH=src python scripts/run_qwen_ds_six_votes_full.py \
   --workers-per-vote 25 --max-tokens 1024 --retries 5
 ```
 
-Qwen 与 DS 各三票分别写在 `adjudication/votes/{qwen1,qwen2,qwen3,ds1,ds2,ds3}`。每票有 `evidence.jsonl`、`predictions.jsonl`、`report.json`、`run_manifest.json` 和 `runner.log`；运行中每完成 1,000 次请求刷新报告。正常中断后用**完全相同命令**续跑，已成功题不重发；控制器会保留未完成的证据末行供审计后移除。最终六份报告都必须 `success=input=1689636` 且 `error=0`，每份预测应同为 1,689,636 行。9204/9205 的前缀缓存必须分别在服务端开启，不是此客户端请求参数。旧分片目录的结果不要与全量目录混用。
+Qwen 与 DS 各三票分别写在 `adjudication-no-thinking/votes/{qwen1,qwen2,qwen3,ds1,ds2,ds3}`。每票有 `evidence.jsonl`、`predictions.jsonl`、`report.json`、`run_manifest.json` 和 `runner.log`；运行中每完成 1,000 次请求刷新报告。正常中断后用**完全相同命令**续跑，已成功题不重发；控制器会保留未完成的证据末行供审计后移除。最终六份报告都必须 `success=input=1689636` 且 `error=0`，每份预测应同为 1,689,636 行。9204/9205 的前缀缓存必须分别在服务端开启，不是此客户端请求参数。旧的 `adjudication` 目录（thinking 未显式关闭）应保留用于对照；其 DS 成功题不能混入新配置的三票。
 
 ## 1. 已确定的决策
 

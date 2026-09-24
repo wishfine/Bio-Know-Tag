@@ -44,6 +44,7 @@ def _vote_command(
         "--timeout", str(service["timeout"]),
         "--retries", str(service["retries"]),
         "--retry-delay", str(retry_delay),
+        "--disable-thinking",
     ]
 
 
@@ -94,7 +95,7 @@ def run_full_six_votes(
         },
     }
     manifest = {
-        "runner_version": "qwen-ds-six-vote-full-stream-v1",
+        "runner_version": "qwen-ds-six-vote-full-stream-v2-no-thinking",
         "input_paths": {"units": str(units), "candidates": str(candidates), "labels": str(labels)},
         "input_sha256": {
             "units": _sha256(units),
@@ -109,7 +110,7 @@ def run_full_six_votes(
         "temperature": 0,
         "stream": True,
         "audited_exclusions_applied": False,
-        "thinking_override": None,
+        "thinking_override": {"qwen": False, "ds": False},
         "prefix_caching": "server_side_required_not_set_by_client",
         "no_shards": True,
     }

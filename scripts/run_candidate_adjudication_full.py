@@ -22,11 +22,13 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--retries", type=int, default=5)
     parser.add_argument("--retry-delay", type=float, default=1)
+    parser.add_argument("--disable-thinking", action="store_true")
     args = parser.parse_args()
+    enable_thinking = False if args.disable_thinking else None
     client = DSClient(
         [args.endpoint], args.model, timeout=args.timeout,
         retries=args.retries, retry_delay=args.retry_delay,
-        request_interval=0,
+        request_interval=0, enable_thinking=enable_thinking,
     )
     report = run_full_adjudication(
         args.units, args.candidates, args.labels, args.run_dir,
@@ -38,7 +40,7 @@ def main() -> int:
             "retries": args.retries,
             "retry_delay": args.retry_delay,
             "request_interval": 0,
-            "enable_thinking": None,
+            "enable_thinking": enable_thinking,
         },
     )
     print(json.dumps({"run_dir": str(args.run_dir), **report}, ensure_ascii=False))
