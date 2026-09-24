@@ -45,6 +45,7 @@ class DSResponse:
     reasoning: Any = None
     response_message_keys: tuple[str, ...] = ()
     retry_errors: tuple[dict[str, Any], ...] = ()
+    finish_reason: str | None = None
 
 
 class DSRequestError(RuntimeError):
@@ -167,7 +168,8 @@ class DSClient:
                 with slot if slot is not None else nullcontext():
                     with urlopen(request, timeout=self.timeout) as response:
                         response_body = json.loads(response.read().decode("utf-8"))
-                message = response_body["choices"][0]["message"]
+                choice = response_body["choices"][0]
+                message = choice["message"]
                 content = message["content"]
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("empty chat completion content")
@@ -180,6 +182,11 @@ class DSClient:
                     reasoning=message.get("reasoning", message.get("reasoning_content")),
                     response_message_keys=tuple(message),
                     retry_errors=tuple(retry_errors),
+                    finish_reason=(
+                        str(choice["finish_reason"])
+                        if choice.get("finish_reason") is not None
+                        else None
+                    ),
                 )
             except (HTTPError, URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
                 last_error = exc

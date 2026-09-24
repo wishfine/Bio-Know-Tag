@@ -363,6 +363,7 @@ def run_adjudication(
     workers: int = 1,
     audited_exclusions_path: str | Path | None = None,
     enable_thinking: bool | None = None,
+    safe_output: bool = False,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -440,6 +441,7 @@ def run_adjudication(
         },
         "candidate_retrieval_versions": candidate_versions,
         "candidate_count_distribution": candidate_count_distribution,
+        "safe_output": safe_output,
         "audited_exclusions": {
             "path": str(Path(audited_exclusions_path)),
             "sha256": _file_sha256(audited_exclusions_path),
@@ -497,14 +499,23 @@ def run_adjudication(
             "reasoning": None,
             "response_message_keys": [],
             "retry_errors": [],
+            "finish_reason": None,
+            "raw_response_chars": 0,
             "error": None,
         }
         try:
+            system_content = (
+                "你是严谨的高中生物知识点判标器。不要输出思维链、逐步推理、"
+                "候选逐项分析或任何JSON以外文字。只输出符合要求的严格JSON；"
+                "reason字段仅写最终判断的简短依据摘要，不超过60字，不写推理过程。"
+                if safe_output
+                else "你是严谨的高中生物知识点判标器，只输出JSON。"
+            )
             response = client.chat(
                 [
                     {
                         "role": "system",
-                        "content": "你是严谨的高中生物知识点判标器，只输出JSON。",
+                        "content": system_content,
                     },
                     {"role": "user", "content": prompt},
                 ],
@@ -512,22 +523,39 @@ def run_adjudication(
             )
             record.update(
                 {
-                    "raw_response": response.content,
+                    "raw_response": None if safe_output else response.content,
+                    "raw_response_chars": len(response.content),
                     "endpoint": response.endpoint,
                     "attempts": response.attempts,
                     "latency_seconds": response.latency_seconds,
                     "usage": getattr(response, "usage", None),
-                    "reasoning": getattr(response, "reasoning", None),
+                    "reasoning": (
+                        None if safe_output else getattr(response, "reasoning", None)
+                    ),
                     "response_message_keys": list(
                         getattr(response, "response_message_keys", ())
                     ),
                     "retry_errors": list(getattr(response, "retry_errors", ())),
+                    "finish_reason": getattr(response, "finish_reason", None),
                 }
             )
+            if safe_output and record["finish_reason"] == "length":
+                raise ValueError("completion truncated because finish_reason=length")
+            if safe_output:
+                try:
+                    response_value = json.loads(response.content)
+                except json.JSONDecodeError as exc:
+                    raise ValueError("response is not a complete standalone JSON object") from exc
+                if not isinstance(response_value, dict):
+                    raise ValueError("response JSON must be an object")
+            else:
+                response_value = parse_json_content(response.content)
             record["parsed_response"] = validate_adjudication_result(
-                parse_json_content(response.content),
+                response_value,
                 set(code_map),
             )
+            if safe_output and len(record["parsed_response"]["reason"]) > 60:
+                raise ValueError("reason exceeds 60 characters in safe-output mode")
         except DSRequestError as exc:
             record.update(
                 {

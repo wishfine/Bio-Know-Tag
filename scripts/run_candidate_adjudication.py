@@ -43,6 +43,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument(
+        "--safe-output",
+        action="store_true",
+        help="require standalone JSON and avoid persisting raw response/reasoning",
+    )
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument(
         "--enable-thinking",
@@ -99,6 +104,7 @@ def main() -> int:
             None if args.no_audited_exclusions else args.audited_exclusions
         ),
         enable_thinking=args.enable_thinking,
+        safe_output=args.safe_output,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1

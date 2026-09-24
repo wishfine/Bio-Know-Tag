@@ -967,3 +967,113 @@ def test_run_adjudication_records_terminal_request_diagnostics(tmp_path: Path):
     assert evidence["endpoint"] == "http://ds.test/v1/chat/completions"
     assert evidence["latency_seconds"] == 31.2
     assert len(evidence["retry_errors"]) == 5
+
+
+def test_safe_output_rejects_truncated_completion_without_persisting_model_text(
+    tmp_path: Path,
+):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units_path.write_text(json.dumps(_unit()) + "\n", encoding="utf-8")
+    candidates_path.write_text(
+        json.dumps({"question_id": "q1", "candidates": [_candidate(1)]}) + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = "模型的长篇推理，不包含完整JSON"
+        endpoint = "http://qwen.test/v1/chat/completions"
+        attempts = 1
+        latency_seconds = 1.2
+        usage = {"completion_tokens": 512}
+        reasoning = "不应落盘的推理字段"
+        response_message_keys = ("role", "content", "reasoning")
+        retry_errors = ()
+        finish_reason = "length"
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="qwen-test",
+        safe_output=True,
+    )
+    evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
+
+    assert report["success"] == 0
+    assert report["error"] == 1
+    assert evidence["finish_reason"] == "length"
+    assert "finish_reason=length" in evidence["error"]
+    assert evidence["raw_response"] is None
+    assert evidence["reasoning"] is None
+    assert evidence["raw_response_chars"] == len(Response.content)
+
+
+def test_safe_output_keeps_only_validated_fields_for_complete_json(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units_path.write_text(json.dumps(_unit()) + "\n", encoding="utf-8")
+    candidates_path.write_text(
+        json.dumps({"question_id": "q1", "candidates": [_candidate(1)]}) + "\n",
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Response:
+        content = json.dumps(
+            {
+                "reason": "当前设问直接考查标签1。",
+                "selected": ["C01"],
+                "evidence": {"C01": "题干"},
+                "need_expand_recall": False,
+                "context_insufficient": False,
+            },
+            ensure_ascii=False,
+        )
+        endpoint = "http://qwen.test/v1/chat/completions"
+        attempts = 1
+        latency_seconds = 1.2
+        usage = {"completion_tokens": 64}
+        reasoning = "不应落盘的推理字段"
+        response_message_keys = ("role", "content", "reasoning")
+        retry_errors = ()
+        finish_reason = "stop"
+
+    class Client:
+        def chat(self, messages, *, max_tokens):
+            assert "不要输出思维链" in messages[0]["content"]
+            return Response()
+
+    report = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="qwen-test",
+        safe_output=True,
+    )
+    evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
+
+    assert report["success"] == 1
+    assert evidence["raw_response"] is None
+    assert evidence["reasoning"] is None
+    assert evidence["parsed_response"]["selected"] == ["C01"]
+    assert evidence["parsed_response"]["reason"] == "当前设问直接考查标签1。"

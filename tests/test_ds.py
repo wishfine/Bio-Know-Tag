@@ -79,7 +79,16 @@ def test_ds_client_retries_retryable_http_error():
                 },
                 ensure_ascii=False,
             )
-            body = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+            body = json.dumps(
+                {
+                    "choices": [
+                        {
+                            "message": {"content": content},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -101,6 +110,7 @@ def test_ds_client_retries_retryable_http_error():
             retries=2,
             retry_delay=0,
             request_interval=0.03,
+            enable_thinking=False,
         )
         response = client.chat([{"role": "user", "content": "test"}], max_tokens=64)
     finally:
@@ -110,10 +120,12 @@ def test_ds_client_retries_retryable_http_error():
     assert response.attempts == 2
     assert response.retry_errors[0]["error_type"] == "HTTPError"
     assert response.endpoint == endpoint
+    assert response.finish_reason == "stop"
     assert state["requests"] == 2
     assert state["request_times"][1] - state["request_times"][0] >= 0.025
     assert state["payload"]["temperature"] == 0
     assert state["payload"]["model"] == "DeepSeek-V4-Flash"
+    assert state["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
 def test_ds_client_distributes_concurrent_requests_across_endpoints():
