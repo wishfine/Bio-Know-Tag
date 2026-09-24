@@ -1185,7 +1185,7 @@ def test_streaming_resume_skips_ok_rows_and_retries_only_errors(tmp_path: Path):
         retry_client,
         model="qwen-test",
         workers=1,
-        safe_output=True,
+        safe_output=False,
         stream=True,
     )
 

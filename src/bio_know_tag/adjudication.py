@@ -55,7 +55,16 @@ def _file_sha256(path: str | Path) -> str:
 def _ensure_run_manifest(path: Path, manifest: dict[str, Any]) -> None:
     if path.exists():
         existing = json.loads(path.read_text(encoding="utf-8"))
-        if existing != manifest:
+        # safe_output only controls response persistence/validation, not the
+        # adjudication input. Allow it to change when resuming a run so that
+        # successful questions remain skipped and only failed rows are retried.
+        existing_comparable = {
+            key: value for key, value in existing.items() if key != "safe_output"
+        }
+        manifest_comparable = {
+            key: value for key, value in manifest.items() if key != "safe_output"
+        }
+        if existing_comparable != manifest_comparable:
             raise ValueError("run manifest mismatch; use a new run directory")
         return
     _write_json_atomic(path, manifest)
