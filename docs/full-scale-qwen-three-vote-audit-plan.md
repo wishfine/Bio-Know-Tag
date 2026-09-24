@@ -2,6 +2,41 @@
 
 状态：六票流式执行器已写好，下游双模型裁决规则仍是设计稿；**不代表**已经完成新服务端烟测、全量精排、教师校准或最终数据发布。适用范围为去重后的生物题库、当前 458 个 Label，以及独立题、小题、真实复合题父题材料。对应的数据与粗排准备见 [去重全量粗排手册](full-dedup-coarse-runbook.md)。
 
+## 当前执行入口：不切片，直接读取全量文件
+
+按最新决定，正式运行**不需要**先执行 `shard_adjudication_inputs.py`。旧分片命令保留在文末作历史对照，不用于本轮。全量精排器逐行读取同一份题目与 `Top25 + 当前458目录内有效旧 knw_ids` 候选，先检查整份输入题号/顺序，再以有界队列发送请求；每票有独立 `votes/<name>` 目录和 SQLite 续跑索引，不将 168 万题及候选一次性读入内存，也不产生分片文件。六票同时启动，每票 25 并发，两服务各至多 75，总计 150。Qwen 与 DS 都固定 `temperature=0`、`stream=true`、`max_tokens=1024`、最多 5 次 HTTP 尝试；Qwen 超时 600 秒、DS 超时 300 秒。`max_tokens` 是输出长度上限，不限制输入长度。运行中仍应关注各票 `runner.log` 的 `finish_reason=length` 和 JSON 失败情况；失败题续跑，不把截断结果当正确输出。
+
+```bash
+cd /local_data/zhangyonglin/Bio-Know-Tag
+git pull --ff-only origin main
+RUN='runtime/20260924-104413-biology-s85-reuse-preprocess'
+FINE="$RUN/fine-full-six"
+
+test -s "$RUN/unified/retrieval_units.jsonl"
+test -s "$RUN/hybrid/candidates.jsonl"
+PYTHONPATH=src python scripts/augment_candidates_with_legacy.py \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --candidates "$RUN/hybrid/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$FINE/legacy"
+python -m json.tool "$FINE/legacy/report.json"
+
+# 若 /v1/models 的实际模型 ID 与下方不一致，按服务返回值修改；
+# 启动后不可在同一结果目录中途改模型、候选或请求参数。
+PYTHONPATH=src python scripts/run_qwen_ds_six_votes_full.py \
+  --units "$RUN/unified/retrieval_units.jsonl" \
+  --candidates "$FINE/legacy/candidates.jsonl" \
+  --labels configs/labels.jsonl \
+  --run-dir "$FINE/adjudication" \
+  --qwen-endpoint 'http://172.22.0.35:9204/v1/chat/completions' \
+  --qwen-model 'qwen3.8-27b-fp8' \
+  --ds-endpoint 'http://172.22.0.35:9205/v1/chat/completions' \
+  --ds-model 'ds-v4-flash' \
+  --workers-per-vote 25 --max-tokens 1024 --retries 5
+```
+
+Qwen 与 DS 各三票分别写在 `adjudication/votes/{qwen1,qwen2,qwen3,ds1,ds2,ds3}`。每票有 `evidence.jsonl`、`predictions.jsonl`、`report.json`、`run_manifest.json` 和 `runner.log`；运行中每完成 1,000 次请求刷新报告。正常中断后用**完全相同命令**续跑，已成功题不重发；控制器会保留未完成的证据末行供审计后移除。最终六份报告都必须 `success=input=1689636` 且 `error=0`，每份预测应同为 1,689,636 行。9204/9205 的前缀缓存必须分别在服务端开启，不是此客户端请求参数。旧分片目录的结果不要与全量目录混用。
+
 ## 1. 已确定的决策
 
 1. 全量精排只使用一套候选：`Hybrid Top25 + 当前458目录中有效的旧 knw_ids`。旧 ID 只补充候选，不在提示词中注明“这是旧标签”，也不作为正确性依据。无效/过期 ID 不补入。
@@ -16,7 +51,7 @@
 
 先用 300–1,000 道分层题做端到端 smoke：检查 JSON 解析、候选映射、六次请求是否真的独立、父子题逻辑、图片/空题干标记和失败续跑。再扩到固定的万题校准集，最后跑全量。六次运行使用不同 run 目录，故障重试只填补失败题，不覆盖已成功响应。记录各服务端口和模型精确 ID，分析服务实例效应。`temperature=0` 也不能假设输出完全确定。
 
-精排执行器现支持 `composite_parent_extra` 与独立题、小题混跑，并按单元类型使用对应提示词；每条结果写入自己的 `prompt_version`。执行器仍一次性读入输入，因此百万级作业先用 `shard_adjudication_inputs.py` 按题号同步切分题目与候选，再逐片运行。上线前仍须用真实 Qwen 服务做混合题小样本烟测与父题并集校验；本地单元测试不等于服务已验证。
+精排执行器支持 `composite_parent_extra` 与独立题、小题混跑，并按单元类型使用对应提示词；每条结果写入自己的 `prompt_version`。**本轮使用上面的有界全量入口**；旧的 `run_candidate_adjudication.py` 仍会一次性读入输入，只能用于小样本或旧分片作业，不得直接拿它跑百万题。上线前仍须用真实服务核验混合题、父题并集和 1024-token 截断情况；本地单元测试不等于服务已验证。
 
 **候选召回检查**：对每个单元记录 Top25、有效旧 ID、新增旧候选、最终候选序列、各 Label 来源和 rank。最终候选可能超过 25 个。六票必须使用完全相同的最终候选；若旧 ID 全在 Top25，最终候选应保持原 Top25 不变。增加候选与不增加候选的旧实验是敏感性证据，不构成本次投票的不同输入臂。
 
@@ -210,7 +245,7 @@ done
 
 执行器固定 `temperature=0`，与之前 Qwen 10 万题的客户端保持一致；输出仍可能波动。没有默认传 `--disable-thinking`，保持先前 Qwen 运行方式；如果新 FP8 服务返回空 content / 仅 reasoning，应另起新运行版本用 `--disable-thinking` 试验，不能在已有三票目录中途切换。客户端不负责开启 vLLM prefix cache，它必须在 **9204 服务端**以 `--enable-prefix-caching` 启动。先检查服务启动日志包含 `enable_prefix_caching=True`；否则请求仍可完成，但不应宣称“已开前缀缓存”。三票同题使用完全相同输入，有利于服务端复用前缀。`three_vote_manifest.json` 固定输入分片清单 SHA、Label SHA、模型/端口、参数、并发和流式开关，续跑配置不一致会停止。
 
-### 六票并行：Qwen 三次＋DS 三次（已确定的新方案）
+### 旧分片式六票并行（本轮不用）
 
 这替代上面的 Qwen 单模型三票执行命令，**不要两个控制器同时跑同一分片**。单个控制器在每个分片上先启动全部 6 票：`qwen1–3` 各 25 worker 打 9204、`ds1–3` 各 25 worker 打 9205；两服务各最多 75 个在途请求，客户端总上限 150。每票使用同一份 Top25＋有效旧 `knw_ids` 候选和同一套按题型区分的提示词，`temperature=0`，流式返回。Qwen 保留前述全量配置：`max_tokens=1024, timeout=600, retries=3`；DS 沿用此前 10 万题的 `max_tokens=512, timeout=300, retries=5`；两者 `retry_delay=1`、无请求间隔、不显式改 thinking 模式、不在投票阶段应用人工排除。两个模型的票数分别保存，**不合成六票多数**。
 
