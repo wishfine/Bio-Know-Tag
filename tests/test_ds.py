@@ -128,6 +128,50 @@ def test_ds_client_retries_retryable_http_error():
     assert state["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
 
 
+def test_ds_client_streams_and_reassembles_chat_completion():
+    state = {"payload": None}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):  # noqa: N802
+            length = int(self.headers["Content-Length"])
+            state["payload"] = json.loads(self.rfile.read(length))
+            events = [
+                'data: {"choices":[{"delta":{"role":"assistant"},"finish_reason":null}]}\n\n',
+                'data: {"choices":[{"delta":{"content":"{\\\"ok\\\":"},"finish_reason":null}]}\n\n',
+                'data: {"choices":[{"delta":{"content":"true}"},"finish_reason":"stop"}]}\n\n',
+                'data: {"choices":[],"usage":{"completion_tokens":12}}\n\n',
+                "data: [DONE]\n\n",
+            ]
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            for event in events:
+                self.wfile.write(event.encode())
+                self.wfile.flush()
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    endpoint = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
+    try:
+        client = DSClient([endpoint], "Qwen", timeout=2, retries=1)
+        response = client.chat(
+            [{"role": "user", "content": "test"}], max_tokens=64, stream=True
+        )
+    finally:
+        server.shutdown()
+        thread.join()
+
+    assert state["payload"]["stream"] is True
+    assert response.content == '{"ok":true}'
+    assert response.finish_reason == "stop"
+    assert response.usage == {"completion_tokens": 12}
+
+
 def test_ds_client_distributes_concurrent_requests_across_endpoints():
     counts = [0, 0]
     locks = [threading.Lock(), threading.Lock()]

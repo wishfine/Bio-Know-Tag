@@ -7,7 +7,7 @@ import json
 import math
 import time
 from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -364,6 +364,7 @@ def run_adjudication(
     audited_exclusions_path: str | Path | None = None,
     enable_thinking: bool | None = None,
     safe_output: bool = False,
+    stream: bool = False,
 ) -> dict[str, Any]:
     run_started = time.monotonic()
     run_started_at = datetime.now(timezone.utc).isoformat()
@@ -501,26 +502,28 @@ def run_adjudication(
             "retry_errors": [],
             "finish_reason": None,
             "raw_response_chars": 0,
+            "stream": stream,
+            "response_policy_version": "json-only-short-reason-120-v1"
+            if safe_output
+            else None,
             "error": None,
         }
         try:
             system_content = (
                 "你是严谨的高中生物知识点判标器。不要输出思维链、逐步推理、"
                 "候选逐项分析或任何JSON以外文字。只输出符合要求的严格JSON；"
-                "reason字段仅写最终判断的简短依据摘要，不超过60字，不写推理过程。"
+                "reason字段仅写最终判断的简短依据摘要，不超过120字，不写推理过程。"
                 if safe_output
                 else "你是严谨的高中生物知识点判标器，只输出JSON。"
             )
-            response = client.chat(
-                [
-                    {
-                        "role": "system",
-                        "content": system_content,
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=max_tokens,
-            )
+            messages = [
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": prompt},
+            ]
+            if stream:
+                response = client.chat(messages, max_tokens=max_tokens, stream=True)
+            else:
+                response = client.chat(messages, max_tokens=max_tokens)
             record.update(
                 {
                     "raw_response": None if safe_output else response.content,
@@ -554,8 +557,8 @@ def run_adjudication(
                 response_value,
                 set(code_map),
             )
-            if safe_output and len(record["parsed_response"]["reason"]) > 60:
-                raise ValueError("reason exceeds 60 characters in safe-output mode")
+            if safe_output and len(record["parsed_response"]["reason"]) > 120:
+                raise ValueError("reason exceeds 120 characters in safe-output mode")
         except DSRequestError as exc:
             record.update(
                 {
@@ -591,6 +594,7 @@ def run_adjudication(
                 "requests_succeeded_this_run": requests_succeeded,
                 "requests_failed_this_run": requests_failed,
                 "workers": workers,
+                "stream_transport_this_run": stream,
                 "model": model,
                 "prompt_version": prompt_version,
             }
@@ -605,7 +609,8 @@ def run_adjudication(
         persist(map(adjudicate, pending_units))
     else:
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            persist(executor.map(adjudicate, pending_units))
+            futures = [executor.submit(adjudicate, item) for item in pending_units]
+            persist(future.result() for future in as_completed(futures))
 
     completed, evidence_rows = _latest_success(
         evidence_path, prompt_versions_by_id=prompt_versions_by_id
@@ -846,6 +851,7 @@ def run_adjudication(
         "requests_retried": requests_retried,
         "retry_error_types": dict(sorted(retry_error_types.items())),
         "workers": workers,
+        "stream_transport_this_run": stream,
         "run_started_at": run_started_at,
         "run_wall_seconds": run_wall_seconds,
         "requests_per_second_this_run": round(

@@ -48,6 +48,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="require standalone JSON and avoid persisting raw response/reasoning",
     )
+    parser.add_argument(
+        "--stream",
+        action="store_true",
+        help="use streaming chat completions; persist each finished question immediately",
+    )
     thinking = parser.add_mutually_exclusive_group()
     thinking.add_argument(
         "--enable-thinking",
@@ -105,6 +110,7 @@ def main() -> int:
         ),
         enable_thinking=args.enable_thinking,
         safe_output=args.safe_output,
+        stream=args.stream,
     )
     print(json.dumps({"run_dir": str(run_dir), **report}, ensure_ascii=False))
     return 0 if report["success"] == report["input"] and report["error"] == 0 else 1

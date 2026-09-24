@@ -10,6 +10,7 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.error import HTTPError, URLError
@@ -133,13 +134,14 @@ class DSClient:
         messages: list[dict[str, str]],
         *,
         max_tokens: int = 1024,
+        stream: bool = False,
     ) -> DSResponse:
         payload = {
             "model": self.model,
             "messages": messages,
             "temperature": 0,
             "max_tokens": max_tokens,
-            "stream": False,
+            "stream": stream,
         }
         if self.enable_thinking is not None:
             payload["chat_template_kwargs"] = {
@@ -167,10 +169,19 @@ class DSClient:
                 slot = self._endpoint_slots.get(endpoint)
                 with slot if slot is not None else nullcontext():
                     with urlopen(request, timeout=self.timeout) as response:
-                        response_body = json.loads(response.read().decode("utf-8"))
-                choice = response_body["choices"][0]
-                message = choice["message"]
-                content = message["content"]
+                        if stream:
+                            content, finish_reason, usage, message_keys = (
+                                self._read_streaming_response(response)
+                            )
+                            message = None
+                        else:
+                            response_body = json.loads(response.read().decode("utf-8"))
+                            choice = response_body["choices"][0]
+                            message = choice["message"]
+                            content = message["content"]
+                            finish_reason = choice.get("finish_reason")
+                            usage = response_body.get("usage")
+                            message_keys = tuple(message)
                 if not isinstance(content, str) or not content.strip():
                     raise ValueError("empty chat completion content")
                 return DSResponse(
@@ -178,17 +189,32 @@ class DSClient:
                     endpoint=endpoint,
                     attempts=attempt,
                     latency_seconds=round(time.monotonic() - started, 3),
-                    usage=response_body.get("usage"),
-                    reasoning=message.get("reasoning", message.get("reasoning_content")),
-                    response_message_keys=tuple(message),
+                    usage=usage,
+                    reasoning=(
+                        None
+                        if message is None
+                        else message.get("reasoning", message.get("reasoning_content"))
+                    ),
+                    response_message_keys=message_keys,
                     retry_errors=tuple(retry_errors),
                     finish_reason=(
-                        str(choice["finish_reason"])
-                        if choice.get("finish_reason") is not None
+                        str(finish_reason)
+                        if finish_reason is not None
                         else None
                     ),
                 )
-            except (HTTPError, URLError, TimeoutError, OSError, KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            except (
+                HTTPError,
+                URLError,
+                TimeoutError,
+                OSError,
+                HTTPException,
+                KeyError,
+                IndexError,
+                TypeError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
                 last_error = exc
                 retry_errors.append(
                     {
@@ -212,6 +238,43 @@ class DSClient:
             latency_seconds=round(time.monotonic() - started, 3),
             retry_errors=retry_errors,
         ) from last_error
+
+    @staticmethod
+    def _read_streaming_response(response: Any) -> tuple[str, str | None, dict[str, Any] | None, tuple[str, ...]]:
+        content: list[str] = []
+        finish_reason: str | None = None
+        usage: dict[str, Any] | None = None
+        message_keys: set[str] = set()
+        done = False
+        for raw_line in response:
+            line = raw_line.decode("utf-8").strip()
+            if not line or line.startswith(":") or not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                done = True
+                break
+            event = json.loads(data)
+            event_usage = event.get("usage")
+            if isinstance(event_usage, dict):
+                usage = event_usage
+            for choice in event.get("choices") or []:
+                if choice.get("finish_reason") is not None:
+                    finish_reason = str(choice["finish_reason"])
+                delta = choice.get("delta") or {}
+                message_keys.update(str(key) for key in delta)
+                piece = delta.get("content")
+                if isinstance(piece, str):
+                    content.append(piece)
+                elif isinstance(piece, list):
+                    content.extend(
+                        str(item["text"])
+                        for item in piece
+                        if isinstance(item, dict) and isinstance(item.get("text"), str)
+                    )
+        if not done:
+            raise ValueError("stream ended before [DONE]")
+        return "".join(content), finish_reason, usage, tuple(sorted(message_keys))
 
 
 def parse_json_content(content: str) -> dict[str, Any]:

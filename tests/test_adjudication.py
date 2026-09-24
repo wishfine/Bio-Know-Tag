@@ -3,6 +3,7 @@ import hashlib
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -171,7 +172,7 @@ def test_run_adjudication_materializes_audited_exclusion_and_filters_training(
         latency_seconds = 0.01
 
     class Client:
-        def chat(self, messages, *, max_tokens):
+        def chat(self, messages, *, max_tokens, stream=False):
             return Response()
 
     report = run_adjudication(
@@ -387,7 +388,7 @@ def test_run_adjudication_filters_units_without_question_text(tmp_path: Path):
         latency_seconds = 0.01
 
     class Client:
-        def chat(self, messages, *, max_tokens):
+        def chat(self, messages, *, max_tokens, stream=False):
             return Response()
 
     report = run_adjudication(
@@ -820,7 +821,7 @@ def test_run_adjudication_refuses_resume_with_changed_candidates(tmp_path: Path)
         latency_seconds = 0.01
 
     class Client:
-        def chat(self, messages, *, max_tokens):
+        def chat(self, messages, *, max_tokens, stream=False):
             return Response()
 
     run_adjudication(
@@ -899,7 +900,7 @@ def test_run_adjudication_filters_risky_training_rows(
         latency_seconds = 0.01
 
     class Client:
-        def chat(self, messages, *, max_tokens):
+        def chat(self, messages, *, max_tokens, stream=False):
             return Response()
 
     report = run_adjudication(
@@ -998,7 +999,8 @@ def test_safe_output_rejects_truncated_completion_without_persisting_model_text(
         finish_reason = "length"
 
     class Client:
-        def chat(self, messages, *, max_tokens):
+        def chat(self, messages, *, max_tokens, stream=False):
+            assert stream is True
             return Response()
 
     report = run_adjudication(
@@ -1009,6 +1011,7 @@ def test_safe_output_rejects_truncated_completion_without_persisting_model_text(
         Client(),
         model="qwen-test",
         safe_output=True,
+        stream=True,
     )
     evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
 
@@ -1039,7 +1042,11 @@ def test_safe_output_keeps_only_validated_fields_for_complete_json(tmp_path: Pat
     class Response:
         content = json.dumps(
             {
-                "reason": "当前设问直接考查标签1。",
+                "reason": (
+                    "第一空需依据图像判断细胞分裂时期及同源染色体的存在情况，"
+                    "第二空需判断自由组合定律发生的具体细胞学时期；两者分别对应"
+                    "不同的遗传学考点，且均由题目设问直接要求。"
+                ),
                 "selected": ["C01"],
                 "evidence": {"C01": "题干"},
                 "need_expand_recall": False,
@@ -1057,8 +1064,10 @@ def test_safe_output_keeps_only_validated_fields_for_complete_json(tmp_path: Pat
         finish_reason = "stop"
 
     class Client:
-        def chat(self, messages, *, max_tokens):
+        def chat(self, messages, *, max_tokens, stream=False):
+            assert stream is True
             assert "不要输出思维链" in messages[0]["content"]
+            assert "不超过120字" in messages[0]["content"]
             return Response()
 
     report = run_adjudication(
@@ -1069,6 +1078,7 @@ def test_safe_output_keeps_only_validated_fields_for_complete_json(tmp_path: Pat
         Client(),
         model="qwen-test",
         safe_output=True,
+        stream=True,
     )
     evidence = json.loads((output / "evidence.jsonl").read_text(encoding="utf-8"))
 
@@ -1076,4 +1086,181 @@ def test_safe_output_keeps_only_validated_fields_for_complete_json(tmp_path: Pat
     assert evidence["raw_response"] is None
     assert evidence["reasoning"] is None
     assert evidence["parsed_response"]["selected"] == ["C01"]
-    assert evidence["parsed_response"]["reason"] == "当前设问直接考查标签1。"
+    assert len(evidence["parsed_response"]["reason"]) > 60
+    assert len(evidence["parsed_response"]["reason"]) <= 120
+
+
+def test_streaming_resume_skips_ok_rows_and_retries_only_errors(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units = [{**_unit(), "question_id": qid} for qid in ("q1", "q2")]
+    units_path.write_text(
+        "".join(json.dumps(unit, ensure_ascii=False) + "\n" for unit in units),
+        encoding="utf-8",
+    )
+    candidates_path.write_text(
+        "".join(
+            json.dumps(
+                {"question_id": unit["question_id"], "candidates": [_candidate(1)]}
+            )
+            + "\n"
+            for unit in units
+        ),
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    selected_response = json.dumps(
+        {
+            "reason": "当前设问直接考查标签1。",
+            "selected": ["C01"],
+            "evidence": {"C01": "题干"},
+            "need_expand_recall": False,
+            "context_insufficient": False,
+        },
+        ensure_ascii=False,
+    )
+
+    class Client:
+        def __init__(self, fail_q2):
+            self.fail_q2 = fail_q2
+            self.calls = []
+
+        def chat(self, messages, *, max_tokens, stream=False):
+            assert stream is True
+            prompt = messages[1]["content"]
+            qid = next(qid for qid in ("q1", "q2") if f'"question_id": "{qid}"' in prompt)
+            self.calls.append(qid)
+            if qid == "q2" and self.fail_q2:
+                return SimpleNamespace(
+                    content="partial output",
+                    endpoint="fake",
+                    attempts=1,
+                    latency_seconds=0.1,
+                    usage={"completion_tokens": 512},
+                    reasoning="private reasoning",
+                    response_message_keys=("role", "content"),
+                    retry_errors=(),
+                    finish_reason="length",
+                )
+            return SimpleNamespace(
+                content=selected_response,
+                endpoint="fake",
+                attempts=1,
+                latency_seconds=0.1,
+                usage={"completion_tokens": 20},
+                reasoning=None,
+                response_message_keys=("role", "content"),
+                retry_errors=(),
+                finish_reason="stop",
+            )
+
+    first_client = Client(fail_q2=True)
+    first = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        first_client,
+        model="qwen-test",
+        workers=1,
+        safe_output=True,
+        stream=True,
+    )
+    assert first["success"] == 1
+    assert first["error"] == 1
+    assert first_client.calls == ["q1", "q2"]
+
+    retry_client = Client(fail_q2=False)
+    resumed = run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        retry_client,
+        model="qwen-test",
+        workers=1,
+        safe_output=True,
+        stream=True,
+    )
+
+    assert retry_client.calls == ["q2"]
+    assert resumed["success"] == 2
+    assert resumed["error"] == 0
+
+
+def test_parallel_adjudication_persists_streamed_results_as_they_finish(tmp_path: Path):
+    units_path = tmp_path / "units.jsonl"
+    candidates_path = tmp_path / "candidates.jsonl"
+    labels_path = tmp_path / "labels.jsonl"
+    output = tmp_path / "judge"
+    units = [{**_unit(), "question_id": qid} for qid in ("slow", "fast")]
+    units_path.write_text(
+        "".join(json.dumps(unit, ensure_ascii=False) + "\n" for unit in units),
+        encoding="utf-8",
+    )
+    candidates_path.write_text(
+        "".join(
+            json.dumps(
+                {"question_id": unit["question_id"], "candidates": [_candidate(1)]}
+            )
+            + "\n"
+            for unit in units
+        ),
+        encoding="utf-8",
+    )
+    labels_path.write_text(
+        json.dumps(_label("L1", "标签1"), ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+
+    class Client:
+        def chat(self, messages, *, max_tokens, stream=False):
+            prompt = messages[1]["content"]
+            qid = "slow" if '"question_id": "slow"' in prompt else "fast"
+            if qid == "slow":
+                time.sleep(0.08)
+            content = json.dumps(
+                {
+                    "reason": f"当前题目直接考查标签1（{qid}）。",
+                    "selected": ["C01"],
+                    "evidence": {"C01": "题干"},
+                    "need_expand_recall": False,
+                    "context_insufficient": False,
+                },
+                ensure_ascii=False,
+            )
+            return SimpleNamespace(
+                content=content,
+                endpoint="fake",
+                attempts=1,
+                latency_seconds=0.1,
+                usage=None,
+                reasoning=None,
+                response_message_keys=("role", "content"),
+                retry_errors=(),
+                finish_reason="stop",
+            )
+
+    run_adjudication(
+        units_path,
+        candidates_path,
+        labels_path,
+        output,
+        Client(),
+        model="qwen-test",
+        workers=2,
+        safe_output=True,
+        stream=True,
+    )
+    evidence_ids = [
+        json.loads(line)["question_id"]
+        for line in (output / "evidence.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert evidence_ids == ["fast", "slow"]
