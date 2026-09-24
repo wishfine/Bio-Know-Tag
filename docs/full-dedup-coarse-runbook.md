@@ -63,7 +63,38 @@ python -m json.tool "$RUN/unified/report.json"
 
 验收：源文件 `wc -l` 为 1,681,314（提供方文件不变时）；预处理、父题审计、打标单元构建的 `error` 都必须为 0。`repaired.s85_question_ids` 必须等于 s85 行数，`output_s85_question_ids = s85_question_ids - dropped_orphan_children`。父题来源状态必须逐类对账：`recovered_context_parents + retained_source_parents_without_text + dropped_orphan_parent_groups = orphan_parent_ids`，相应三类小题数之和必须等于 `orphan_child_count`。`label_units.orphan_sub_question_units` 应为 0，但无文本父题的小题要检查 `parent_context_missing` / `image_context_missing` 标记。`unified.retrieval_units` 必须等于 `retrieval_label_units+retrieval_parent_extra_units`。`recovered_context_parents.jsonl` 记录回连父题；这些父题材料可参与额外知识点判断，但不是 s85 中新增的独立题。`dropped_orphan_groups.jsonl` 保留被排除小题的 ID，便于审计与回滚。
 
-若已按旧命令生成了 `merged.raw.jsonl`，这份合并后文件及其下游结果不能直接用于本次“已去重全量”实验；应新建运行目录，从上面的 `DEDUP` 原文件重新预处理。原始去重文件不受影响。
+若已按旧命令生成了 `merged.raw.jsonl`，这份合并后文件及其下游结果不能**不经校验直接使用**。优先使用下面的增量裁剪路径；只有父子关系校验失败时，才从 `DEDUP` 原文件重新预处理。原始去重文件不受影响。
+
+### 已完成旧预处理时的增量路径（优先用这个）
+
+如果旧目录是 `runtime/20260923-190648-biology-dedup-s85-full-coarse`，可复用其中的 `preprocess/questions.jsonl`，不重跑 168 万题的 HTML 清洗。`filter_processed_to_s85.py` 只保留 s85 内的真实题号，剔除追加的 15 条新题，并将同 ID 的 30 条更新记录恢复成 s85 原文。若被剔除的记录原本是父题、其小题仍在 s85，则保留**空父题容器**待后续来源回连，绝不让更新题的题干冒充 s85 父题。它校验全部 s85 ID 恰好出现一次，且父子关系一致；如关系已被更新改变，会停止而不是静默改写，此时才需走上面的全量预处理路径。
+
+```bash
+OLD='runtime/20260923-190648-biology-dedup-s85-full-coarse'
+UPDATES='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/update-data/all.jsonl'
+RUN="runtime/$(date +%Y%m%d-%H%M%S)-biology-s85-reuse-preprocess"
+mkdir -p "$RUN"/{orphan,orphan-source-audit,units,unified,sparse,dense,hybrid}
+
+# 不预先创建 "$RUN/filtered" 或 "$RUN/repaired"；两步均原子发布。
+PYTHONPATH=src python scripts/filter_processed_to_s85.py \
+  --processed "$OLD/preprocess/questions.jsonl" \
+  --dedup-raw "$DEDUP" --updates "$UPDATES" \
+  --run-dir "$RUN/filtered"
+python -m json.tool "$RUN/filtered/report.json"
+
+PYTHONPATH=src python scripts/audit_orphan_parents.py \
+  --raw "$DEDUP" --processed "$RUN/filtered/questions.jsonl" \
+  --run-dir "$RUN/orphan"
+PYTHONPATH=src python scripts/audit_orphan_parent_source.py \
+  --orphan-audit "$RUN/orphan/orphan_parents.jsonl" \
+  --original-raw "$ORIGINAL" --run-dir "$RUN/orphan-source-audit"
+PYTHONPATH=src python scripts/repair_dedup_parent_context.py \
+  --processed "$RUN/filtered/questions.jsonl" \
+  --parent-source-audit "$RUN/orphan-source-audit/per_parent.jsonl" \
+  --dedup-raw "$DEDUP" --run-dir "$RUN/repaired"
+```
+
+后续从第 1 节的 `build_label_units.py` 一行继续，使用这个新 `RUN`；第 2 节的粗召回命令不变。旧 `units`、`unified`、BM25、Dense、Hybrid 不能复用，因为父题背景和输入单元已改变。新的来源审计也要重跑：旧侧车只含题干，不包含此次父题额外打标要用的选项、解析和 `knw_ids`。
 
 `unified/content_review.jsonl` 列出无当前题干的单元；其中有选项/解析者保留并标记，`no_current_question_text` 者进入 `text_ineligible.jsonl`，不参加文本召回。预处理会移除 `<img>`，空 `stem` 不等于原题没有内容；需结合图片审计核查，不能据此删除原始题。图片 URL 只供审核，不会让纯文本模型看到图片。
 
