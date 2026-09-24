@@ -76,8 +76,19 @@ def audit_orphan_parent_source(
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
                 raise ValueError(f"invalid question_info for original parent {question_id}: {exc}") from exc
             raw_stem_has_image = "<img" in str(raw_info.get("stem") or "").lower()
+            raw_material_has_image = "<img" in json.dumps(
+                {
+                    "stem": raw_info.get("stem"),
+                    "options": raw_info.get("options"),
+                    "analysis": raw_info.get("analysis"),
+                },
+                ensure_ascii=False,
+            ).lower()
             stem = cleaned["stem"]
-            if stem:
+            original_parent_id = str(row.get("parent_id") or question_id)
+            if original_parent_id != question_id:
+                status = "found_nonself_parent_row"
+            elif stem:
                 status = "found_with_text_stem"
             elif cleaned["options"] or cleaned["analysis"]:
                 status = "found_with_other_text"
@@ -91,9 +102,12 @@ def audit_orphan_parent_source(
                 "status": status,
                 "parent_stem": stem,
                 "options": cleaned["options"],
+                "answer": cleaned["answer"],
                 "analysis": cleaned["analysis"],
+                "knw_ids": [str(value) for value in (row.get("knw_ids") or []) if value],
                 "raw_stem_has_image": raw_stem_has_image,
-                "original_parent_id": str(row.get("parent_id") or question_id),
+                "raw_material_has_image": raw_material_has_image,
+                "original_parent_id": original_parent_id,
                 "original_line_number": line_number,
             }
             if progress_every and raw_rows % progress_every == 0:
@@ -112,8 +126,11 @@ def audit_orphan_parent_source(
                 "status": "missing_from_original",
                 "parent_stem": "",
                 "options": "",
+                "answer": "",
                 "analysis": "",
+                "knw_ids": [],
                 "raw_stem_has_image": False,
+                "raw_material_has_image": False,
                 "original_parent_id": None,
                 "original_line_number": None,
             }
@@ -132,6 +149,7 @@ def audit_orphan_parent_source(
         "found_with_other_text": counts["found_with_other_text"],
         "found_image_only_stem": counts["found_image_only_stem"],
         "found_without_text": counts["found_without_text"],
+        "found_nonself_parent_row": counts["found_nonself_parent_row"],
         "child_counts_by_status": dict(sorted(child_counts.items())),
         "original_raw_rows_scanned": raw_rows,
         "original_raw_malformed_rows": malformed_rows,

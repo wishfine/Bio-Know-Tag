@@ -332,7 +332,18 @@ def build_labeling_derivatives(
                                     "legacy_candidate_ids": matched,
                                     "legacy_unmatched_ids": unmatched,
                                     "legacy_strategy_codes": strategy_codes,
-                                    "flags": {"synthetic_parent": False},
+                                    "flags": {
+                                        "synthetic_parent": False,
+                                        "context_only_recovered_parent": bool(
+                                            parent.get("context_only_recovered_parent")
+                                        ),
+                                        "recovered_parent_has_image": bool(
+                                            parent.get("recovered_parent_has_image")
+                                        ),
+                                        "recovered_parent_text_missing": bool(
+                                            parent.get("recovered_parent_text_missing")
+                                        ),
+                                    },
                                 },
                             )
 
@@ -344,6 +355,10 @@ def build_labeling_derivatives(
                             sibling_question_ids=sibling_ids,
                             catalog=catalog,
                         )
+                        if parent.get("recovered_parent_has_image"):
+                            unit["flags"]["image_context_missing"] = True
+                        if parent.get("recovered_parent_text_missing"):
+                            unit["flags"]["parent_context_missing"] = True
                         _write_line(stage, unit)
                         counters["label_units"] += 1
                         counters[f"{unit_type}_units"] += 1

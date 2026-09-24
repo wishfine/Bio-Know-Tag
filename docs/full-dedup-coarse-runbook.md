@@ -4,6 +4,10 @@
 
 父题材料、小题、独立题进入**同一个** `retrieval_units.jsonl`，一起通过 BM25、Dense、Hybrid。父题材料单元只负责判断额外知识点；父题最终标签在精排后汇总为“小题标签并集 + 父题材料额外标签”。精排执行器现支持混合输入，但百万级运行须先分片，不能把整份统一输入直接交给一次性读入内存的执行器。
 
+s85 文件中已有 10,192 个被小题引用但不在文件内的父题 ID。来源审计显示，其中约 9,804 个可从原始库找回文本题干，388 个原始库也没有。**找得到的父题只作为上下文回连，不加回 s85 原始题目集合；真正缺来源的整组小题排除。**若源父题存在但只有图片或没有可用文本，其小题保留、标记缺上下文待复核，不因文本缺失而删除。若同 ID 原始记录实际是另一道小题而非父题，则不作为有效父题回连。该审计先前针对的是误合并 45 条更新的运行目录，正式 s85 运行须重新审计和校验，实际数量以新报告为准。
+
+这里的“去重”以数据提供方已完成的 s85 文件为准：不再用清洗后文本哈希删除不同 `question_id` 的题。回连程序逐一核对处理前所有真实题目 ID 与 s85 原文件相等，拒绝混入旧的 `merged.raw.jsonl` 结果。
+
 ## 1. 直接预处理已去重文件
 
 在服务器仓库中执行。各阶段成功后再进入下一阶段，不要并行启动依赖任务。
@@ -13,11 +17,12 @@ cd /local_data/zhangyonglin/Bio-Know-Tag
 git pull --ff-only origin main
 
 DEDUP='/home/share_ssd_data/nfs-data1/wangmeng148/data/tiku/high-geo-hist-pol/question-dedup-20260918/生物-20260914-dedup-s85.jsonl'
+ORIGINAL='/local_data/zhangyonglin/data/bio-know-tag/biology.with-update-20260914.raw.jsonl'
 RUN="runtime/$(date +%Y%m%d-%H%M%S)-biology-dedup-s85-full-coarse"
-mkdir -p "$RUN"/{preprocess,orphan,units,unified,sparse,dense,hybrid,image-audit}
+mkdir -p "$RUN"/{preprocess,orphan,orphan-source-audit,units,unified,sparse,dense,hybrid,image-audit}
 printf '%s\n' "$RUN" > runtime/LATEST_DEDUP_S85_FULL_COARSE_RUN
 
-test -s "$DEDUP"
+test -s "$DEDUP" && test -s "$ORIGINAL"
 
 PYTHONPATH=src python scripts/preprocess_questions.py \
   --input "$DEDUP" --run-dir "$RUN/preprocess"
@@ -28,10 +33,24 @@ PYTHONPATH=src python scripts/audit_orphan_parents.py \
   --run-dir "$RUN/orphan"
 python -m json.tool "$RUN/orphan/report.json"
 
-PYTHONPATH=src python scripts/build_label_units.py \
-  --input "$RUN/preprocess/questions.jsonl" \
-  --labels configs/label_strategies.review2.jsonl \
+PYTHONPATH=src python scripts/audit_orphan_parent_source.py \
   --orphan-audit "$RUN/orphan/orphan_parents.jsonl" \
+  --original-raw "$ORIGINAL" \
+  --run-dir "$RUN/orphan-source-audit"
+python -m json.tool "$RUN/orphan-source-audit/report.json"
+
+# 不预先 mkdir "$RUN/repaired"；修复器校验全量 ID 后原子发布该目录。
+PYTHONPATH=src python scripts/repair_dedup_parent_context.py \
+  --processed "$RUN/preprocess/questions.jsonl" \
+  --parent-source-audit "$RUN/orphan-source-audit/per_parent.jsonl" \
+  --dedup-raw "$DEDUP" \
+  --run-dir "$RUN/repaired"
+python -m json.tool "$RUN/repaired/report.json"
+
+PYTHONPATH=src python scripts/build_label_units.py \
+  --input "$RUN/repaired/questions.jsonl" \
+  --labels configs/label_strategies.review2.jsonl \
+  --orphan-audit "$RUN/repaired/orphan_parents.jsonl" \
   --run-dir "$RUN/units"
 python -m json.tool "$RUN/units/build_report.json"
 
@@ -42,7 +61,7 @@ PYTHONPATH=src python scripts/build_unified_retrieval_units.py \
 python -m json.tool "$RUN/unified/report.json"
 ```
 
-验收：源文件 `wc -l` 为 1,681,314（提供方文件不变时）；预处理、父题审计、打标单元构建的 `error` 都必须为 0。`unified.retrieval_units` 必须等于 `retrieval_label_units+retrieval_parent_extra_units`。去重后父题可能不在保留集，重点检查 `orphan/report.json`，不要将合成的缺父题容器判标。
+验收：源文件 `wc -l` 为 1,681,314（提供方文件不变时）；预处理、父题审计、打标单元构建的 `error` 都必须为 0。`repaired.s85_question_ids` 必须等于 s85 行数，`output_s85_question_ids = s85_question_ids - dropped_orphan_children`。父题来源状态必须逐类对账：`recovered_context_parents + retained_source_parents_without_text + dropped_orphan_parent_groups = orphan_parent_ids`，相应三类小题数之和必须等于 `orphan_child_count`。`label_units.orphan_sub_question_units` 应为 0，但无文本父题的小题要检查 `parent_context_missing` / `image_context_missing` 标记。`unified.retrieval_units` 必须等于 `retrieval_label_units+retrieval_parent_extra_units`。`recovered_context_parents.jsonl` 记录回连父题；这些父题材料可参与额外知识点判断，但不是 s85 中新增的独立题。`dropped_orphan_groups.jsonl` 保留被排除小题的 ID，便于审计与回滚。
 
 若已按旧命令生成了 `merged.raw.jsonl`，这份合并后文件及其下游结果不能直接用于本次“已去重全量”实验；应新建运行目录，从上面的 `DEDUP` 原文件重新预处理。原始去重文件不受影响。
 

@@ -63,7 +63,16 @@ def _parent_material_unit(parent: dict[str, Any], child_ids: list[str]) -> dict[
         "legacy_knw_ids": parent.get("legacy_knw_ids") or [],
         "flags": {
             "parent_context_missing": False,
-            "image_context_missing": bool(IMAGE_REFERENCE_RE.search(" ".join((stem, options, analysis)))),
+            "image_context_missing": bool(
+                IMAGE_REFERENCE_RE.search(" ".join((stem, options, analysis)))
+                or (parent.get("flags") or {}).get("recovered_parent_has_image")
+            ),
+            "context_only_recovered_parent": bool(
+                (parent.get("flags") or {}).get("context_only_recovered_parent")
+            ),
+            "recovered_parent_text_missing": bool(
+                (parent.get("flags") or {}).get("recovered_parent_text_missing")
+            ),
         },
     }
 
