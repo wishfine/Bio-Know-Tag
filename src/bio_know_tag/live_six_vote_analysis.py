@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import random
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -16,6 +17,7 @@ MODELS = {"qwen": VOTES[:3], "ds": VOTES[3:]}
 
 def _load_vote(
     path: Path, *, max_success: int | None = None,
+    candidate_signatures_out: dict[str, bytes] | None = None,
 ) -> tuple[dict[str, frozenset[str]], dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -59,6 +61,12 @@ def _load_vote(
                 counts["invalid_success_rows"] += 1
                 continue
             label_ids = frozenset(str(code_map[code]) for code in codes)
+            if candidate_signatures_out is not None:
+                ordered_codes = sorted(code_map, key=lambda code: int(code[1:]) if code.startswith("C") and code[1:].isdigit() else -1)
+                candidate_signatures_out[question_id] = hashlib.blake2b(
+                    "\0".join(str(code_map[code]) for code in ordered_codes).encode("utf-8"),
+                    digest_size=16,
+                ).digest()
             if question_id in selected_by_question:
                 counts["repeat_successes"] += 1
             selected_by_question[question_id] = label_ids
