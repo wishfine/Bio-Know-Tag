@@ -14,7 +14,9 @@ VOTES = ("qwen1", "qwen2", "qwen3", "ds1", "ds2", "ds3")
 MODELS = {"qwen": VOTES[:3], "ds": VOTES[3:]}
 
 
-def _load_vote(path: Path) -> tuple[dict[str, frozenset[str]], dict[str, Any]]:
+def _load_vote(
+    path: Path, *, max_success: int | None = None,
+) -> tuple[dict[str, frozenset[str]], dict[str, Any]]:
     if not path.is_file():
         raise FileNotFoundError(path)
     selected_by_question: dict[str, frozenset[str]] = {}
@@ -60,6 +62,11 @@ def _load_vote(path: Path) -> tuple[dict[str, frozenset[str]], dict[str, Any]]:
             if question_id in selected_by_question:
                 counts["repeat_successes"] += 1
             selected_by_question[question_id] = label_ids
+            if max_success is not None and len(selected_by_question) > max_success:
+                raise ValueError(
+                    f"{path.parent.name} exceeds in-memory snapshot memory cap of "
+                    f"{max_success:,} successful questions"
+                )
     return selected_by_question, {
         **dict(counts),
         "successful_questions": len(selected_by_question),
@@ -148,12 +155,10 @@ def analyze_live_six_vote(
     data: dict[str, dict[str, frozenset[str]]] = {}
     vote_reports: dict[str, dict[str, Any]] = {}
     for vote in VOTES:
-        data[vote], vote_reports[vote] = _load_vote(root / "votes" / vote / "evidence.jsonl")
-        if len(data[vote]) > max_success_per_vote:
-            raise ValueError(
-                f"{vote} exceeds in-memory snapshot memory cap of "
-                f"{max_success_per_vote:,} successful questions; use a disk-backed analysis for full results"
-            )
+        data[vote], vote_reports[vote] = _load_vote(
+            root / "votes" / vote / "evidence.jsonl",
+            max_success=max_success_per_vote,
+        )
     common = set.intersection(*(set(rows) for rows in data.values()))
     count = len(common)
     within: dict[str, Counter[str]] = {model: Counter() for model in MODELS}
