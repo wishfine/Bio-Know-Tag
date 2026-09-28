@@ -341,6 +341,7 @@ fine-full-six/
 结果位置：`consensus/predictions.jsonl`及`consensus/report.json`。`selected_labels`保存严格交集供审核；`high_precision_candidate`还要求质量检查通过，`training_eligible`及`usable_for_training`当前均为false，等待独立校准，不静默批准训练数据。父题汇总仍使用现有独立聚合流程，本执行器不把子题标签回灌到父题材料单元，也不自动执行最终父题汇总。
 
 以下命令不停止旧任务；启用旧结果复用前，应确认旧控制器及其票进程已经停止。不允许两个控制器同时写旧目录。
+此外，旧证据通常缺少逐题prompt SHA。下面的启动命令采用显式兼容复用，**仅在确认旧实验与当前代码使用同一份prompt后执行**；否则去掉`--seed-from-six-vote`和兼容选项，在新的空目录重跑。
 
 ```bash
 cd /local_data/zhangyonglin/Bio-Know-Tag
@@ -356,6 +357,7 @@ nohup env PYTHONPATH=src python -u scripts/run_qwen_ds_strict_adaptive_full.py \
   --labels configs/labels.jsonl \
   --run-dir "$NEW" \
   --seed-from-six-vote "$OLD" \
+  --allow-legacy-missing-prompt-hash \
   --workers-per-vote 35 \
   --max-tokens 1024 --retries 5 \
   --third-diagnostic-limit 0 \
@@ -366,7 +368,7 @@ printf 'LOG=%s\n' "$LOG"
 
 上面省略的模型、端口、超时、temperature、流式和关闭thinking均使用第3节的默认值。不复用旧结果时从命令中移除`--seed-from-six-vote`，但必须使用新的空目录。
 
-此前固定六票的旧证据通常未记录prompt SHA。因此上面的严格模式示例可能拒绝旧结果复用；只有确认其prompt与当前冻结版本相同后，才在首次启动命令添加`--allow-legacy-missing-prompt-hash`。该选项也纳入manifest，不能中途在原新目录开关。若无法确认原prompt，使用新目录重跑，不靠兼容开关绕过已知不一致。
+此前固定六票的旧证据通常未记录prompt SHA，因此上述兼容复用无法独立证明旧请求的完整prompt内容与新请求相同。该选项纳入manifest，不能中途在原新目录开关。若无法确认原prompt，使用新目录重跑，不靠兼容开关绕过已知不一致。
 
 续跑使用原目录及完全相同的参数。不能在原目录把`--third-diagnostic-limit 0`改为100，或修改模型、prompt、候选、Label卡、并发等；manifest不一致会拒绝续跑，应新建版本目录。每票进度在`votes/<vote>/report.json`和`runner.log`，阶段在`progress.json`，控制器输出在上面的LOG。新目录不适用旧“固定六票全量分母”的ETA脚本。
 
