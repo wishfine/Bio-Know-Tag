@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import hashlib
 import json
 import os
 import sqlite3
@@ -56,6 +57,7 @@ def _record_request(unit: dict, candidate: dict, labels: dict, client: Any, mode
     record = {
         "stage": "candidate_adjudication", "question_id": question_id,
         "prompt_version": _prompt_version_for_unit(unit),
+        "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "candidate_code_map": code_map, "model": model,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "raw_response": None, "parsed_response": None,

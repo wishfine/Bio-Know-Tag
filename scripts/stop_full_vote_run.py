@@ -13,6 +13,7 @@ def matching_processes(root: Path) -> dict[int, list[str]]:
     allowed = {
         "run_qwen_ds_six_votes_full.py", "run_candidate_adjudication_full.py",
         "run_qwen_ds_adaptive_votes_full.py",
+        "run_qwen_ds_strict_adaptive_full.py",
     }
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) == os.getpid():
