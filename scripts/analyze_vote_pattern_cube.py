@@ -7,7 +7,9 @@ import argparse
 import json
 from pathlib import Path
 
-from bio_know_tag.vote_pattern_cube import PATTERNS, analyze_vote_pattern_cube
+from bio_know_tag.vote_pattern_cube import (
+    PATTERNS, analyze_vote_pattern_cube, export_label_review_packages,
+)
 
 
 def _percent(numerator: int, denominator: int) -> str:
@@ -73,8 +75,23 @@ def main() -> int:
     parser.add_argument("--positive-per-label", type=Path)
     parser.add_argument("--boundary-assessments", type=Path)
     parser.add_argument("--sample-per-pattern", type=int, default=10)
+    parser.add_argument("--review-examples-per-label-pattern", type=int, default=0,
+                        help="Export this many examples for each Label in Q3/D3, Q3/D0 and Q0/D3; 0 disables the review package")
+    parser.add_argument("--image-context", type=Path,
+                        help="Optional image_context.jsonl sidecar for question and analysis URLs")
+    parser.add_argument("--image-map", type=Path,
+                        help="Optional raw four_subject_image_urls.json; streamed for sampled question IDs only")
     parser.add_argument("--max-success-per-vote", type=int, default=500000)
     args = parser.parse_args()
+    if args.review_examples_per_label_pattern < 0:
+        parser.error("--review-examples-per-label-pattern must be nonnegative")
+    if (args.image_context or args.image_map) and not args.review_examples_per_label_pattern:
+        parser.error("image inputs require --review-examples-per-label-pattern")
+    if args.image_context and args.image_map:
+        parser.error("use only one of --image-context and --image-map")
+    for image_path in (args.image_context, args.image_map):
+        if image_path is not None and not image_path.is_file():
+            parser.error(f"image input not found: {image_path}")
     source = args.votes_root.resolve()
     output = args.run_dir.resolve()
     if output == source or source in output.parents:
@@ -91,6 +108,8 @@ def main() -> int:
         units_path=args.units,
         labels_path=args.labels,
         sample_per_pattern=args.sample_per_pattern,
+        sample_per_label_pattern=args.review_examples_per_label_pattern or 3,
+        full_review_context=bool(args.review_examples_per_label_pattern),
         max_success_per_vote=args.max_success_per_vote,
         positive_per_label_path=args.positive_per_label,
         boundary_assessments_path=args.boundary_assessments,
@@ -102,6 +121,13 @@ def main() -> int:
         for pattern in PATTERNS:
             for sample in report["samples"][pattern]:
                 handle.write(json.dumps(sample, ensure_ascii=False) + "\n")
+    if args.review_examples_per_label_pattern:
+        review = export_label_review_packages(
+            report, output / "review-three-patterns",
+            image_context_path=args.image_context,
+            image_map_path=args.image_map,
+        )
+        print(f"逐 Label 自查：{output / 'review-three-patterns/index.md'}；抽样数：{review['sample_counts']}", flush=True)
     print(markdown, flush=True)
     print(f"报告：{output / 'report.md'}；完整逐Label数据：{output / 'report.json'}", flush=True)
     return 0

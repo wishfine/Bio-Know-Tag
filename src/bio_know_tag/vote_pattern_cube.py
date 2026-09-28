@@ -12,11 +12,17 @@ from pathlib import Path
 from typing import Any
 
 from bio_know_tag.adjudication import CANDIDATE_ORDER_VERSION
+from bio_know_tag.image_context import iter_json_object_items
 from bio_know_tag.live_six_vote_analysis import VOTES, _check_manifests, _load_vote
 
 
 PATTERNS = tuple(f"Q{q}/D{d}" for q in range(4) for d in range(4))
 REVIEW_PATTERNS = ("Q3/D3", "Q3/D0", "Q0/D3", "Q2/D1", "Q1/D2", "Q0/D0")
+TEACHER_PREVIEW_PATTERNS = ("Q3/D3", "Q3/D0", "Q0/D3")
+IMAGE_URL_FIELDS = (
+    "stem_image_url", "analysis_image_url",
+    "parent_stem_image_url", "parent_analysis_image_url",
+)
 QUALITY_FLAGS = (
     "image_context_missing", "parent_context_missing", "duplicate_label_conflict",
 )
@@ -65,16 +71,23 @@ def _rank_band(rank: Any) -> str:
     return "26+"
 
 
-def _reservoir(
-    bucket: list[dict[str, Any]], item: dict[str, Any],
-    seen: int, limit: int, rng: random.Random,
-) -> None:
-    if len(bucket) < limit:
-        bucket.append(item)
-    elif limit:
+def _reservoir_slot(
+    bucket_size: int, seen: int, limit: int, rng: random.Random,
+) -> int | None:
+    if bucket_size < limit:
+        return bucket_size
+    if limit:
         replacement = rng.randrange(seen)
         if replacement < limit:
-            bucket[replacement] = item
+            return replacement
+    return None
+
+
+def _store_sample(bucket: list[dict[str, Any]], slot: int, sample: dict[str, Any]) -> None:
+    if slot == len(bucket):
+        bucket.append(sample)
+    else:
+        bucket[slot] = sample
 
 
 def analyze_vote_pattern_cube(
@@ -84,13 +97,15 @@ def analyze_vote_pattern_cube(
     units_path: str | Path,
     labels_path: str | Path,
     sample_per_pattern: int = 10,
+    sample_per_label_pattern: int = 3,
+    full_review_context: bool = False,
     max_success_per_vote: int = 500000,
     positive_per_label_path: str | Path | None = None,
     boundary_assessments_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Build one reusable 16-state cube; never infer teacher truth from votes."""
-    if sample_per_pattern < 0 or max_success_per_vote < 1:
-        raise ValueError("sample_per_pattern must be nonnegative; max_success_per_vote positive")
+    if sample_per_pattern < 0 or sample_per_label_pattern < 0 or max_success_per_vote < 1:
+        raise ValueError("sample limits must be nonnegative; max_success_per_vote positive")
     root = Path(votes_root)
     expected = _expected_hashes(root)
     manifest_alignment = _check_manifests(root)
@@ -108,6 +123,7 @@ def analyze_vote_pattern_cube(
             candidate_signatures_out=signatures,
         )
         vote_candidate_signatures[vote] = signatures
+        print(f"vote snapshot: {vote} successful={len(vote_maps[vote]):,}", flush=True)
     common = set.intersection(*(set(rows) for rows in vote_maps.values()))
     pattern_counts: Counter[str] = Counter()
     by_label: dict[str, Counter[str]] = defaultdict(Counter)
@@ -127,6 +143,11 @@ def analyze_vote_pattern_cube(
     label_samples: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     label_sample_seen: Counter[tuple[str, str]] = Counter()
     rng = random.Random(20260928)
+    label_sample_limit = (
+        sample_per_label_pattern if full_review_context
+        else min(sample_per_pattern, sample_per_label_pattern)
+    )
+    sampled_label_patterns = TEACHER_PREVIEW_PATTERNS if full_review_context else REVIEW_PATTERNS
     seen_common: set[str] = set()
     candidate_digest = hashlib.sha256()
     unit_digest = hashlib.sha256()
@@ -145,6 +166,12 @@ def analyze_vote_pattern_cube(
             unit = json.loads(unit_line)
             candidate_rows_scanned += 1
             unit_rows_scanned += 1
+            if candidate_rows_scanned % 250000 == 0:
+                print(
+                    f"candidate scan: {candidate_rows_scanned:,} rows, "
+                    f"{len(seen_common):,} six-vote common questions matched",
+                    flush=True,
+                )
             qid = str(unit.get("question_id") or "")
             if not qid or qid != str(candidate.get("question_id") or ""):
                 raise ValueError(f"unit/candidate question_id mismatch at row {unit_rows_scanned}")
@@ -196,8 +223,25 @@ def analyze_vote_pattern_cube(
                 by_candidate_source[source][pattern] += 1
                 label_by_candidate_source[label_id][source][pattern] += 1
                 sample_seen[pattern] += 1
+                global_bucket = samples[pattern]
+                global_slot = _reservoir_slot(
+                    len(global_bucket), sample_seen[pattern], sample_per_pattern, rng
+                )
+                label_bucket = None
+                label_slot = None
+                if pattern in sampled_label_patterns:
+                    key = (label_id, pattern)
+                    label_sample_seen[key] += 1
+                    label_bucket = label_samples[label_id][pattern]
+                    label_slot = _reservoir_slot(
+                        len(label_bucket), label_sample_seen[key], label_sample_limit, rng
+                    )
+                if global_slot is None and label_slot is None:
+                    continue
                 sample = {
                     "question_id": qid,
+                    "parent_id": str(unit.get("parent_id") or ""),
+                    "task_id": f"{qid}::{label_id}",
                     "label_id": label_id,
                     "label_name": str(labels[label_id].get("label_name") or ""),
                     "unit_type": unit_type,
@@ -212,11 +256,23 @@ def analyze_vote_pattern_cube(
                     "parent_stem": str(unit.get("parent_stem") or "")[:500],
                     "analysis": str(unit.get("analysis") or "")[:800],
                 }
-                _reservoir(samples[pattern], sample, sample_seen[pattern], sample_per_pattern, rng)
-                if pattern in REVIEW_PATTERNS:
-                    key = (label_id, pattern)
-                    label_sample_seen[key] += 1
-                    _reservoir(label_samples[label_id][pattern], sample, label_sample_seen[key], min(sample_per_pattern, 3), rng)
+                if full_review_context:
+                    sample.update({
+                        "stem": str(unit.get("stem") or ""),
+                        "parent_stem": str(unit.get("parent_stem") or ""),
+                        "options": str(unit.get("options") or ""),
+                        "answer_text": str(unit.get("answer_text") or ""),
+                        "analysis": str(unit.get("analysis") or ""),
+                        "legacy_knw_ids": sorted(legacy),
+                        "six_vote_selected_label_ids": {
+                            vote: sorted(vote_maps[vote][qid]) for vote in VOTES
+                        },
+                        **{field: str(unit.get(field) or "") for field in IMAGE_URL_FIELDS},
+                    })
+                if global_slot is not None:
+                    _store_sample(global_bucket, global_slot, sample)
+                if label_bucket is not None and label_slot is not None:
+                    _store_sample(label_bucket, label_slot, sample)
 
     if seen_common != common:
         raise ValueError(f"{len(common - seen_common)} six-vote successful questions missing from candidates/units")
@@ -256,6 +312,9 @@ def analyze_vote_pattern_cube(
             "label_id": label_id,
             "label_name": str(label.get("label_name") or ""),
             "label_path": label.get("label_path"),
+            "definition": label.get("definition"),
+            "core_concepts": label.get("core_concepts"),
+            "distinctions": label.get("distinctions"),
             "candidate_exposure": exposed,
             "any_vote_selected": any_selected,
             "patterns": {pattern: counts[pattern] for pattern in PATTERNS},
@@ -310,5 +369,132 @@ def analyze_vote_pattern_cube(
         "votes": vote_reports,
         "labels": label_rows,
         "samples": samples,
+        "sample_per_label_pattern": sample_per_label_pattern,
+        "full_review_context": full_review_context,
         "warning": "Pattern counts measure vote behavior, not correctness. Q0/D0 is defined only for candidate-exposed labels on all-six successful questions. Previous DS coverage and old knw_ids are weak supervision, not teacher gold.",
     }
+
+
+def export_label_review_packages(
+    report: dict[str, Any],
+    output_dir: str | Path,
+    *,
+    image_context_path: str | Path | None = None,
+    image_map_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Export sampled examples for three vote patterns, one JSON per Label."""
+    if image_context_path is not None and image_map_path is not None:
+        raise ValueError("use either image_context_path or image_map_path")
+    output = Path(output_dir)
+    if output.exists() and (not output.is_dir() or any(output.iterdir())):
+        raise ValueError("review output directory must be new or empty")
+    output.mkdir(parents=True, exist_ok=True)
+    labels_dir = output / "labels"
+    labels_dir.mkdir()
+    wanted_ids = {
+        str(sample["question_id"])
+        for label in report["labels"]
+        for pattern in TEACHER_PREVIEW_PATTERNS
+        for sample in (label.get("representative_samples") or {}).get(pattern, [])
+    }
+    parents_by_question = {
+        str(sample["question_id"]): str(sample.get("parent_id") or sample["question_id"])
+        for label in report["labels"]
+        for pattern in TEACHER_PREVIEW_PATTERNS
+        for sample in (label.get("representative_samples") or {}).get(pattern, [])
+    }
+    images: dict[str, dict[str, Any]] = {}
+    if image_context_path is not None:
+        with Path(image_context_path).open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    row = json.loads(line)
+                    qid = str(row.get("question_id") or "")
+                    if qid in wanted_ids:
+                        images[qid] = row
+    if image_map_path is not None:
+        raw_images: dict[str, tuple[str, str]] = {}
+        target_ids = wanted_ids | set(parents_by_question.values())
+        for scanned, (qid, value) in enumerate(iter_json_object_items(image_map_path), 1):
+            if qid in target_ids and isinstance(value, dict):
+                raw_images[qid] = (
+                    str(value.get("stemImageUrl") or ""),
+                    str(value.get("analysisImageUrl") or ""),
+                )
+            if scanned % 250000 == 0:
+                print(f"image map scan: {scanned:,} records, {len(raw_images):,} sampled IDs matched", flush=True)
+        for qid, parent_id in parents_by_question.items():
+            stem_url, analysis_url = raw_images.get(qid, ("", ""))
+            parent_stem_url, parent_analysis_url = (
+                raw_images.get(parent_id, ("", "")) if parent_id != qid else ("", "")
+            )
+            images[qid] = dict(zip(IMAGE_URL_FIELDS, (
+                stem_url, analysis_url, parent_stem_url, parent_analysis_url,
+            )))
+    sample_counts: Counter[str] = Counter()
+    labels_with_examples = 0
+    all_examples_path = output / "review_samples.jsonl"
+    index_lines = [
+        "# 六票三类重点样本：逐 Label 自查", "",
+        f"每个 Label 每种票型最多 {report.get('sample_per_label_pattern')} 道；随机种子固定。",
+        "这是诊断性抽样，不是教师金标，也不能用所见样本直接估计准确率。", "",
+        "| Label | Q3/D3 总量/样本 | Q3/D0 总量/样本 | Q0/D3 总量/样本 |",
+        "|---|---:|---:|---:|",
+    ]
+    with all_examples_path.open("w", encoding="utf-8") as all_examples:
+        for label in report["labels"]:
+            label_id = str(label["label_id"])
+            examples: dict[str, list[dict[str, Any]]] = {}
+            for pattern in TEACHER_PREVIEW_PATTERNS:
+                enriched = []
+                for sample in (label.get("representative_samples") or {}).get(pattern, []):
+                    item = dict(sample)
+                    image = images.get(str(item["question_id"]), {})
+                    for field in IMAGE_URL_FIELDS:
+                        item[field] = str(image.get(field) or item.get(field) or "")
+                    enriched.append(item)
+                    all_examples.write(json.dumps(item, ensure_ascii=False) + "\n")
+                examples[pattern] = enriched
+                sample_counts[pattern] += len(enriched)
+            labels_with_examples += int(any(examples.values()))
+            package = {
+                "label_id": label_id,
+                "label_name": label.get("label_name"),
+                "label_path": label.get("label_path"),
+                "definition": label.get("definition"),
+                "core_concepts": label.get("core_concepts"),
+                "distinctions": label.get("distinctions"),
+                "candidate_exposure": label.get("candidate_exposure"),
+                "pattern_population_counts": {
+                    pattern: label["patterns"][pattern] for pattern in TEACHER_PREVIEW_PATTERNS
+                },
+                "sample_counts": {pattern: len(examples[pattern]) for pattern in TEACHER_PREVIEW_PATTERNS},
+                "examples": examples,
+                "sampling_note": "Deterministic reservoir samples from six-vote common-success candidate exposures; diagnostic only, not teacher gold.",
+            }
+            (labels_dir / f"{label_id}.json").write_text(
+                json.dumps(package, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+            counts = package["pattern_population_counts"]
+            index_lines.append(
+                f"| [{label.get('label_name') or label_id}](labels/{label_id}.json) | "
+                + " | ".join(f"{counts[pattern]}/{len(examples[pattern])}" for pattern in TEACHER_PREVIEW_PATTERNS)
+                + " |"
+            )
+    (output / "index.md").write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+    summary = {
+        "labels": len(report["labels"]),
+        "labels_with_examples": labels_with_examples,
+        "sample_counts": {pattern: sample_counts[pattern] for pattern in TEACHER_PREVIEW_PATTERNS},
+        "image_context_path": str(image_context_path) if image_context_path else None,
+        "image_map_path": str(image_map_path) if image_map_path else None,
+        "image_context_question_matches": sum(
+            any(row.get(field) for field in IMAGE_URL_FIELDS) for row in images.values()
+        ),
+        "full_review_context": bool(report.get("full_review_context")),
+        "sample_per_label_pattern": report.get("sample_per_label_pattern"),
+        "common_successful_questions": report.get("common_successful_questions"),
+        "warning": "Diagnostic random examples, not teacher gold; image URLs may be absent if no sidecar was provided.",
+    }
+    (output / "manifest.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
