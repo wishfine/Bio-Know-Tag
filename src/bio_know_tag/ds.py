@@ -140,6 +140,7 @@ class DSClient:
             "model": self.model,
             "messages": messages,
             "temperature": 0,
+            "n": 1,
             "max_tokens": max_tokens,
             "stream": stream,
         }

@@ -176,11 +176,11 @@ def _take_pair(iterators, qid, candidate):
     return rows
 
 
-def aggregate_strict(units,candidates,output):
+def aggregate_strict(units,candidates,output, *, single_pair_only=False):
     output = Path(output)
-    second = [_rows(output/'votes'/v/'predictions.jsonl') if (output/'votes'/v/'predictions.jsonl').exists() else iter(()) for v in SECOND]
-    third = [_rows(output/'votes'/v/'predictions.jsonl') if (output/'votes'/v/'predictions.jsonl').exists() else iter(()) for v in THIRD]
-    third_units = _rows(output/'routing/stage3/units.jsonl') if (output/'routing/stage3/units.jsonl').exists() else iter(())
+    second = [_rows(output/'votes'/v/'predictions.jsonl') if not single_pair_only and (output/'votes'/v/'predictions.jsonl').exists() else iter(()) for v in SECOND]
+    third = [_rows(output/'votes'/v/'predictions.jsonl') if not single_pair_only and (output/'votes'/v/'predictions.jsonl').exists() else iter(()) for v in THIRD]
+    third_units = _rows(output/'routing/stage3/units.jsonl') if not single_pair_only and (output/'routing/stage3/units.jsonl').exists() else iter(())
     next_third = next(third_units,None)
     paths = [Path(units),Path(candidates),*(output/'votes'/v/'predictions.jsonl' for v in FIRST)]
     directory = output/'consensus'
@@ -192,7 +192,7 @@ def aggregate_strict(units,candidates,output):
             qid = str(unit['question_id'])
             votes=[q,d]; vote_names=list(FIRST)
             differs = _ids(q,candidate) != _ids(d,candidate)
-            if differs:
+            if differs and not single_pair_only:
                 votes += _take_pair(second,qid,candidate); vote_names += list(SECOND)
                 counts['four_vote_used'] += 1
             before_third = set.intersection(*(_ids(r,candidate) for r in votes))
@@ -219,19 +219,19 @@ def aggregate_strict(units,candidates,output):
             counts['empty'] += not bool(kept)
             _write_row(handle, dict(question_id=qid, parent_id=unit.get('parent_id',qid),
                 unit_type=unit.get('unit_type'), selected_labels=selected,
-                policy_version=VERSION, actual_vote_count=n, completed_stage_vote_count=n,
+                policy_version='dual-model-single-pair-intersection-v1' if single_pair_only else VERSION, actual_vote_count=n, completed_stage_vote_count=n,
                 executed_vote_ids=vote_names, label_vote_counts=support,
                 not_retained_label_ids=sorted(set(support)-kept),
                 withdrawn_after_third_label_ids=sorted(before_third-kept) if third_requested else [],
                 selection_status=f'STRICT_INTERSECTION_{n}' if kept else 'NO_POSITIVE_LABEL',
-                stage2_requested=differs, third_vote_status='COMPLETED' if third_requested else 'NOT_REQUESTED',
+                stage2_requested=differs and not single_pair_only, cross_model_disagreement=differs, third_vote_status='COMPLETED' if third_requested else 'NOT_REQUESTED',
                 quality_status='REVIEW' if reasons else 'PASS', quality_reasons=reasons,
                 high_precision_candidate=bool(kept and not reasons), needs_review=bool(reasons),
                 calibration_status='NO_TEACHER_GOLD', training_eligible=False, usable_for_training=False))
     if next_third is not None or any(next(it,None) is not None for it in [*second,*third,third_units]):
         raise ValueError('extra or misaligned conditional predictions')
     temp.replace(directory/'predictions.jsonl')
-    report=dict(counts,policy_version=VERSION,training_approved=0)
+    report=dict(counts,policy_version='dual-model-single-pair-intersection-v1' if single_pair_only else VERSION,training_approved=0)
     _write_json_atomic(directory/'report.json',report)
     return report
 
@@ -360,11 +360,14 @@ def run_strict_adaptive(units_path,candidates_path,labels_path,run_dir, *,
     seed_from_six_vote=None, allow_legacy_missing_prompt_hash=False, qwen_endpoint='http://172.22.0.35:9204/v1/chat/completions',
     qwen_model='qwen3.8-27b-fp8',ds_endpoint='http://172.22.0.35:9205/v1/chat/completions',
     ds_model='ds-v4-flash',workers_per_vote=35,max_tokens=1024,qwen_timeout=600,ds_timeout=300,
-    retries=5,retry_delay=1,third_diagnostic_limit=0,diagnostic_seed='strict-third-v1',preflight=True):
+    retries=5,retry_delay=1,third_diagnostic_limit=0,diagnostic_seed='strict-third-v1',preflight=True,
+    single_pair_only=False):
     if min(workers_per_vote,max_tokens,retries,qwen_timeout,ds_timeout)<=0 or retry_delay<0:
         raise ValueError('workers/tokens/retries/timeouts must be positive')
     if not 0 <= third_diagnostic_limit <= 10000:
         raise ValueError('third diagnostic limit must be 0..10000')
+    if single_pair_only and third_diagnostic_limit:
+        raise ValueError('single-pair-only cannot request third votes')
     if qwen_endpoint==ds_endpoint:
         raise ValueError('model endpoints must differ')
     units,candidates,labels,output=map(lambda p:Path(p).resolve(),[units_path,candidates_path,labels_path,run_dir])
@@ -386,6 +389,8 @@ def run_strict_adaptive(units_path,candidates_path,labels_path,run_dir, *,
     manifest['allow_legacy_missing_prompt_hash']=allow_legacy_missing_prompt_hash
     manifest['adjudication_code_sha256']=_sha256(Path(__file__).with_name('adjudication.py'))
     manifest['full_adjudication_code_sha256']=_sha256(Path(__file__).with_name('full_adjudication.py'))
+    if single_pair_only:
+        manifest['single_pair_only']=True
     output.mkdir(parents=True,exist_ok=True)
     old_signal=signal.getsignal(signal.SIGTERM)
     signal.signal(signal.SIGTERM,_interrupt_on_sigterm)
@@ -397,8 +402,16 @@ def run_strict_adaptive(units_path,candidates_path,labels_path,run_dir, *,
                 raise RuntimeError('another strict adaptive controller is running') from exc
             path=output/'run_manifest.json'
             if path.exists():
-                if json.loads(path.read_text())!=manifest:
-                    raise ValueError('strict adaptive manifest mismatch on resume')
+                previous=json.loads(path.read_text())
+                if previous!=manifest:
+                    # Concurrency and routing policy may change without changing
+                    # any first-pair prompts, transport settings or input data.
+                    comparable=lambda m:{k:v for k,v in m.items() if k not in ('workers_per_vote','single_pair_only')}
+                    if comparable(previous)!=comparable(manifest):
+                        raise ValueError('strict adaptive manifest mismatch on resume')
+                    digest=hashlib.sha256(json.dumps(previous,sort_keys=True).encode()).hexdigest()[:16]
+                    _write_json_atomic(output/f'run_manifest.previous-{digest}.json',previous)
+                    _write_json_atomic(path,manifest)
             else:
                 _write_json_atomic(path,manifest)
             if preflight:
@@ -429,6 +442,15 @@ def run_strict_adaptive(units_path,candidates_path,labels_path,run_dir, *,
             count=_count_rows(units)
             _write_json_atomic(output/'progress.json',dict(status='running',phase='first_pair',input=count))
             run_phase(FIRST,units,candidates,count)
+            if single_pair_only:
+                _write_json_atomic(output/'progress.json',dict(status='running',phase='single_pair_consensus',input=count))
+                consensus=aggregate_strict(units,candidates,output,single_pair_only=True)
+                result=dict(status='complete',policy_version='dual-model-single-pair-intersection-v1',
+                            input=count,consensus=consensus,logical_requests=2*count,
+                            max_in_flight_per_service=workers_per_vote,training_approved=0)
+                _write_json_atomic(output/'report.json',result)
+                _write_json_atomic(output/'progress.json',dict(status='complete',phase='complete',input=count))
+                return result
             split=build_stage2(units,candidates,output)
             _write_json_atomic(output/'progress.json',dict(status='running',phase='second_pair',**split))
             directory=output/'routing/stage2'

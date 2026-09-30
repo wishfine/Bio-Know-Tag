@@ -19,6 +19,7 @@ def main():
     parser.add_argument('--ds-endpoint',default='http://172.22.0.35:9205/v1/chat/completions')
     parser.add_argument('--ds-model',default='ds-v4-flash')
     parser.add_argument('--workers-per-vote',type=int,default=35)
+    parser.add_argument('--strategy',choices=('adaptive','single-pair'),default='adaptive',help='adaptive: add votes on disagreement (original); single-pair: one vote per model, intersection only')
     parser.add_argument('--max-tokens',type=int,default=1024)
     parser.add_argument('--qwen-timeout',type=float,default=600)
     parser.add_argument('--ds-timeout',type=float,default=300)
@@ -28,6 +29,7 @@ def main():
     parser.add_argument('--diagnostic-seed',default='strict-third-v1')
     parser.add_argument('--skip-model-preflight',action='store_true')
     args=vars(parser.parse_args())
+    args['single_pair_only']=args.pop('strategy')=='single-pair'
     preflight=not args.pop('skip_model_preflight')
     units,candidates,labels,run_dir=(args.pop(x) for x in ('units','candidates','labels','run_dir'))
     result=run_strict_adaptive(units,candidates,labels,run_dir,preflight=preflight,**args)

@@ -124,6 +124,7 @@ def test_ds_client_retries_retryable_http_error():
     assert state["requests"] == 2
     assert state["request_times"][1] - state["request_times"][0] >= 0.025
     assert state["payload"]["temperature"] == 0
+    assert state["payload"]["n"] == 1
     assert state["payload"]["model"] == "DeepSeek-V4-Flash"
     assert state["payload"]["chat_template_kwargs"] == {"enable_thinking": False}
 

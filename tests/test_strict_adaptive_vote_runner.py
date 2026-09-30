@@ -77,6 +77,19 @@ def test_missing_second_vote_not_treated_as_no(tmp_path):
         api().aggregate_strict(u,c,tmp_path)
 
 
+def test_single_pair_ignores_existing_conditional_votes(tmp_path):
+    u,c=fixture_inputs(tmp_path)
+    # Existing second votes must neither trigger more work nor affect Q1/D1.
+    write(tmp_path/'votes/qwen2_disagreement/predictions.jsonl',[pred('b',[])])
+    write(tmp_path/'votes/ds2_disagreement/predictions.jsonl',[pred('b',[])])
+    report=api().aggregate_strict(u,c,tmp_path,single_pair_only=True)
+    rows=list(map(json.loads,(tmp_path/'consensus/predictions.jsonl').read_text().splitlines()))
+    assert [x['label_id'] for x in rows[1]['selected_labels']]==['A']
+    assert rows[1]['cross_model_disagreement'] and not rows[1]['stage2_requested']
+    assert all(row['actual_vote_count']==2 for row in rows)
+    assert report['four_vote_used']==report['six_vote_used']==0
+
+
 def test_frozen_subset_tamper_refused(tmp_path):
     u,c=fixture_inputs(tmp_path);api().build_stage2(u,c,tmp_path)
     (tmp_path/'routing/stage2/units.jsonl').write_text('{}\n')
@@ -148,8 +161,14 @@ def test_controller_transport_resume_and_seed_old_votes(tmp_path, monkeypatch):
     assert all(p.read_bytes()==content for p,content in originals.items())
     runner.run_strict_adaptive(u,c,labels,out,**options)
     assert len(process_calls)==6
+    runner.run_strict_adaptive(u,c,labels,out,**{**options,'workers_per_vote':64})
+    assert len(process_calls)==6
+    single_options={**options,'third_diagnostic_limit':0,'single_pair_only':True,'workers_per_vote':64}
+    # Diagnostic configuration remains immutable; the usual migration uses 0.
     with pytest.raises(ValueError,match='manifest mismatch'):
-        runner.run_strict_adaptive(u,c,labels,out,**{**options,'workers_per_vote':36})
+        runner.run_strict_adaptive(u,c,labels,out,**single_options)
+    with pytest.raises(ValueError,match='manifest mismatch'):
+        runner.run_strict_adaptive(u,c,labels,out,**{**options,'max_tokens':512})
 
 
 def test_seed_requires_stopped_source_and_rejects_candidate_map_mismatch(tmp_path):
@@ -183,6 +202,30 @@ def test_empty_stage2_never_starts_conditional_votes(tmp_path,monkeypatch):
     report=runner.run_strict_adaptive(u,c,labels,out,preflight=False)
     assert calls==['qwen1','ds1'] and report['logical_requests']==6
     assert report['stage2']['disagreements']==0
+
+
+def test_resume_adaptive_as_single_pair_keeps_first_votes(tmp_path,monkeypatch):
+    runner=api();u,c=fixture_inputs(tmp_path);labels=tmp_path/'labels.jsonl'
+    write(labels,[dict(label_id=x) for x in ['A','B','C']])
+    out=tmp_path/'run';calls=[]
+    def local(specs, *, labels, **kwargs):
+        for vote,units,candidates,directory,service in specs:
+            calls.append(vote)
+            rows=list(runner._rows(units))
+            selected=['A','B'] if vote.startswith('qwen') else ['A','C']
+            write(directory/'predictions.jsonl',[pred(q['question_id'],selected) for q in rows])
+            child=runner._child_manifest(units,candidates,labels,service,1)
+            (directory/'run_manifest.json').write_text(json.dumps(child))
+            (directory/'report.json').write_text(json.dumps(dict(success=len(rows),error=0,model=service['model'])))
+    monkeypatch.setattr(runner,'_run_vote_processes',local)
+    runner.run_strict_adaptive(u,c,labels,out,preflight=False)
+    assert calls==['qwen1','ds1','qwen2_disagreement','ds2_disagreement']
+    originals={v:(out/'votes'/v/'predictions.jsonl').read_bytes() for v in runner.FIRST}
+    result=runner.run_strict_adaptive(u,c,labels,out,preflight=False,single_pair_only=True,workers_per_vote=64)
+    assert len(calls)==4 and result['logical_requests']==6
+    assert list(out.glob('run_manifest.previous-*.json'))
+    assert all((out/'votes'/v/'predictions.jsonl').read_bytes()==data for v,data in originals.items())
+    assert not any(row['stage2_requested'] for row in runner._rows(out/'consensus/predictions.jsonl'))
 
 
 def test_quality_gate_retains_audit_but_blocks_candidate(tmp_path):
